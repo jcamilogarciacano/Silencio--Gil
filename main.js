@@ -69,6 +69,9 @@ const ENEMY_SPAWN_POINTS = [
 const HORDE_START_COUNT = 3;
 const HORDE_INCREMENT = 2;
 const HORDE_BREAK_TIME = 5;
+const BULLET_SPEED = 28;
+const BULLET_LIFETIME = 1.2;
+const BULLET_SIZE = 0.12;
 
 const canvas = document.getElementById("renderCanvas");
 const engine = new BABYLON.Engine(canvas, false, {
@@ -105,6 +108,7 @@ const hordeState = {
   spawnTimer: 0,
 };
 const deathStats = { round: 1, kills: 0 };
+const bullets = [];
 
 engine.resize();
 resizeForPixelLook(engine);
@@ -152,6 +156,7 @@ function createScene(targetEngine) {
   recreateEnemiesForRound(scene, HORDE_START_COUNT);
   hitEffectManager = createHitEffectManager(scene);
   createPickups(scene);
+  createFacingIndicator(scene, player);
   const cameraRig = setupCamera(scene, player);
   const inputState = setupInput(scene, player, cameraRig);
   hudElements = createHUD();
@@ -452,6 +457,39 @@ function updateHitEffects(delta) {
   }
 }
 
+function spawnBullet(player, targetPosition, forwardDir) {
+  const scene = player.getScene();
+  const mesh = BABYLON.MeshBuilder.CreateSphere("bullet", { diameter: BULLET_SIZE }, scene);
+  mesh.position = player.position.add(new BABYLON.Vector3(0, 1, 0)).add(forwardDir.scale(0.4));
+  const dir = targetPosition.subtract(mesh.position);
+  const distance = dir.length();
+  const normDir = dir.normalize();
+  const mat = new BABYLON.StandardMaterial("bulletMat", scene);
+  mat.diffuseColor = new BABYLON.Color3(0.9, 0.9, 0.2);
+  mat.emissiveColor = new BABYLON.Color3(0.6, 0.6, 0.1);
+  mat.specularColor = BABYLON.Color3.Black();
+  mesh.material = mat;
+  mesh.isPickable = false;
+  bullets.push({
+    mesh,
+    dir: normDir,
+    life: Math.min(BULLET_LIFETIME, distance / BULLET_SPEED + 0.2),
+  });
+}
+
+function updateBullets(delta) {
+  for (let i = bullets.length - 1; i >= 0; i--) {
+    const b = bullets[i];
+    b.life -= delta;
+    if (b.life <= 0 || !b.mesh || b.mesh.isDisposed()) {
+      b.mesh?.dispose?.();
+      bullets.splice(i, 1);
+      continue;
+    }
+    b.mesh.position.addInPlace(b.dir.scale(BULLET_SPEED * delta));
+  }
+}
+
 function createPickups(scene) {
   pickups.length = 0;
   WEAPON_PICKUPS.forEach((pickup, index) => {
@@ -606,6 +644,23 @@ function createPlayer(scene) {
   return player;
 }
 
+function createFacingIndicator(scene, player) {
+  const stem = BABYLON.MeshBuilder.CreateCylinder("faceStem", { height: 0.4, diameter: 0.05 }, scene);
+  const tip = BABYLON.MeshBuilder.CreateCylinder("faceTip", { height: 0.25, diameterTop: 0, diameterBottom: 0.12, tessellation: 6 }, scene);
+  stem.parent = player;
+  tip.parent = player;
+  stem.position = new BABYLON.Vector3(0, 1.1, 0.1);
+  tip.position = new BABYLON.Vector3(0, 1.3, 0.2);
+  const mat = new BABYLON.StandardMaterial("faceMat", scene);
+  mat.diffuseColor = new BABYLON.Color3(0.8, 0.2, 0.2);
+  mat.emissiveColor = new BABYLON.Color3(0.3, 0.05, 0.05);
+  mat.specularColor = BABYLON.Color3.Black();
+  stem.material = mat;
+  tip.material = mat;
+  stem.isPickable = false;
+  tip.isPickable = false;
+}
+
 function handlePlayerAttack(player) {
   if (!playerState.isAlive || playerState.attackCooldown > 0) return;
   const weaponId = getCurrentWeaponId();
@@ -639,12 +694,16 @@ function handlePlayerAttack(player) {
     if (bestEnemy) {
       bestEnemy.health -= weaponDamage;
       spawnHitEffect(bestEnemy.mesh.position);
+      spawnBullet(player, bestEnemy.mesh.position, forwardDir);
       if (bestEnemy.health <= 0) {
         bestEnemy.health = 0;
         bestEnemy.isAlive = false;
         hordeState.killsThisRound++;
         hordeState.totalKills++;
       }
+    } else {
+      const missTarget = player.position.add(forwardDir.scale(weaponRange));
+      spawnBullet(player, missTarget, forwardDir);
     }
     return;
   }
@@ -976,6 +1035,7 @@ function update(scene, player, cameraRig, inputState, delta) {
     }
   }
   updateHitEffects(delta);
+  updateBullets(delta);
   updateCameraRig(cameraRig, player, delta, isMoving);
   updateHUD();
 
