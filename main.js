@@ -34,13 +34,20 @@ const ENEMY_ATTACK_DAMAGE = 8;
 const ENEMY_ATTACK_COOLDOWN = 1.1;
 const ENEMY_DETECTION_RADIUS = 20;
 const ENEMY_IDLE_DRIFT = 0.6;
-const DEATH_SINK_SPEED = 0.6;
+const DEATH_SINK_SPEED = 1.5;
 const WEAPONS = {
   bat: { name: "Bat", range: 2.8, damage: 18, cooldown: 0.5, cone: 60 },
   pistol: { name: "Pistol", range: 10, damage: 12, cooldown: 0.6, cone: 20 },
 };
 const HIT_EFFECT_LIFETIME = 0.25;
 const HIT_EFFECT_SIZE = 1.1;
+const ENEMY_GROUND_Y = 1.1;
+const PICKUP_RADIUS = 1.4;
+const PICKUP_HEIGHT = 0.4;
+const WEAPON_PICKUPS = [
+  { type: "bat", position: new BABYLON.Vector3(-10, PICKUP_HEIGHT, 0) },
+  { type: "pistol", position: new BABYLON.Vector3(12, PICKUP_HEIGHT, 1.2) },
+];
 
 const canvas = document.getElementById("renderCanvas");
 const engine = new BABYLON.Engine(canvas, false, {
@@ -59,12 +66,13 @@ const playerState = {
   attackRange: PLAYER_ATTACK_RANGE,
   attackDamage: PLAYER_ATTACK_DAMAGE,
   attackAnimTime: 0,
-  inventory: ["bat", "pistol"],
-  currentWeaponIndex: 0,
+  inventory: [],
+  currentWeaponIndex: -1,
 };
 let hudElements = null;
 let hitEffectManager = null;
 const hitEffects = [];
+const pickups = [];
 
 engine.resize();
 resizeForPixelLook(engine);
@@ -111,6 +119,7 @@ function createScene(targetEngine) {
   const player = createPlayer(scene);
   createEnemies(scene);
   hitEffectManager = createHitEffectManager(scene);
+  createWeaponPickups(scene);
   const cameraRig = setupCamera(scene, player);
   const inputState = setupInput(scene, player, cameraRig);
   hudElements = createHUD();
@@ -343,7 +352,7 @@ function createEnemies(scene) {
       { height: 2.2, radius: 0.4, tessellation: 5 },
       scene
     );
-    mesh.position = new BABYLON.Vector3(x, 1.1, z);
+    mesh.position = new BABYLON.Vector3(x, ENEMY_GROUND_Y, z);
     mesh.rotation.y = Math.random() * Math.PI * 2;
     mesh.checkCollisions = true;
     mesh.ellipsoid = new BABYLON.Vector3(0.45, 1.1, 0.45);
@@ -414,6 +423,48 @@ function updateHitEffects(delta) {
   }
 }
 
+function createWeaponPickups(scene) {
+  pickups.length = 0;
+  WEAPON_PICKUPS.forEach((pickup, index) => {
+    const mesh = BABYLON.MeshBuilder.CreateBox(`pickup-${pickup.type}-${index}`, { size: 0.8 }, scene);
+    mesh.position = pickup.position.clone();
+    const mat = new BABYLON.StandardMaterial(`pickup-mat-${pickup.type}-${index}`, scene);
+    mat.diffuseColor = pickup.type === "bat" ? new BABYLON.Color3(0.55, 0.45, 0.35) : new BABYLON.Color3(0.35, 0.35, 0.45);
+    mat.emissiveColor = new BABYLON.Color3(0.05, 0.05, 0.05);
+    mat.specularColor = BABYLON.Color3.Black();
+    mesh.material = mat;
+    mesh.checkCollisions = false;
+    pickups.push({ mesh, type: pickup.type, collected: false });
+  });
+}
+
+function resetPickups() {
+  pickups.forEach((pickup) => {
+    pickup.collected = false;
+    if (pickup.mesh && !pickup.mesh.isDisposed()) {
+      pickup.mesh.isVisible = true;
+    }
+  });
+}
+
+function updatePickups(player) {
+  pickups.forEach((pickup) => {
+    if (pickup.collected || !pickup.mesh || pickup.mesh.isDisposed()) return;
+    const dist = BABYLON.Vector3.Distance(player.position, pickup.mesh.position);
+    if (dist < PICKUP_RADIUS) {
+      pickup.collected = true;
+      pickup.mesh.isVisible = false;
+      if (!playerState.inventory.includes(pickup.type)) {
+        playerState.inventory.push(pickup.type);
+        if (playerState.currentWeaponIndex === -1) {
+          playerState.currentWeaponIndex = 0;
+        }
+        updateHUD();
+      }
+    }
+  });
+}
+
 function updateEnemies(scene, player, delta) {
   const targetClamp = ROAD_WIDTH * 0.45;
   const playerPos = player.position;
@@ -452,6 +503,8 @@ function updateEnemies(scene, player, delta) {
     }
 
     enemy.mesh.position.z = BABYLON.Scalar.Clamp(enemy.mesh.position.z, -targetClamp, targetClamp);
+    enemy.mesh.moveWithCollisions(scene.gravity.scale(delta)); // pull enemies down to the ground plane
+    enemy.mesh.position.y = Math.max(enemy.mesh.position.y, ENEMY_GROUND_Y);
 
     if (distance < ENEMY_ATTACK_RANGE && enemy.attackCooldown <= 0 && playerState.isAlive) {
       applyDamageToPlayer(ENEMY_ATTACK_DAMAGE);
@@ -480,7 +533,8 @@ function createPlayer(scene) {
 
 function handlePlayerAttack(player) {
   if (!playerState.isAlive || playerState.attackCooldown > 0) return;
-  const weaponId = playerState.inventory[playerState.currentWeaponIndex];
+  const weaponId = getCurrentWeaponId();
+  if (!weaponId) return;
   const weapon = WEAPONS[weaponId] || WEAPONS.bat;
   playerState.attackCooldown = weapon.cooldown;
   playerState.attackAnimTime = PLAYER_ATTACK_ANIM;
@@ -543,6 +597,9 @@ function resetGame(scene, player, cameraRig) {
   playerState.isAlive = true;
   playerState.attackCooldown = 0;
   playerState.attackAnimTime = 0;
+  playerState.inventory = [];
+  playerState.currentWeaponIndex = -1;
+  resetPickups();
   respawnEnemies();
   cameraRig.smoothedPosition = player.position.clone().add(new BABYLON.Vector3(0, CAMERA_HEIGHT, -CAMERA_DISTANCE));
   cameraRig.target = player.position.clone();
@@ -757,6 +814,7 @@ function update(scene, player, cameraRig, inputState, delta) {
     handlePlayerAttack(player);
   }
 
+  updatePickups(player);
   updateEnemies(scene, player, delta);
   updateHitEffects(delta);
   updateCameraRig(cameraRig, player, delta, isMoving);
@@ -834,14 +892,19 @@ function createHUD() {
   const hp = document.createElement("div");
   hp.textContent = `HP: ${playerState.health} / ${playerState.maxHealth}`;
 
-  const weapon = document.createElement("div");
-  weapon.textContent = `Weapon: ${WEAPONS[playerState.inventory[playerState.currentWeaponIndex]].name}`;
+  const inventory = document.createElement("div");
+  Object.assign(inventory.style, {
+    display: "flex",
+    gap: "6px",
+    marginTop: "6px",
+    alignItems: "center",
+  });
 
   const controls = document.createElement("div");
   controls.innerHTML = "Space: attack<br>1/2: switch weapon<br>R: restart when dead";
 
   container.appendChild(hp);
-  container.appendChild(weapon);
+  container.appendChild(inventory);
   container.appendChild(controls);
   document.body.appendChild(container);
 
@@ -864,7 +927,7 @@ function createHUD() {
   });
   document.body.appendChild(deathMessage);
 
-  return { container, hp, weapon, controls, deathMessage };
+  return { container, hp, inventory, controls, deathMessage };
 }
 
 function updateHUD() {
@@ -873,6 +936,73 @@ function updateHUD() {
   hudElements.hp.textContent = `HP: ${hpValue} / ${playerState.maxHealth}`;
   hudElements.hp.style.color = playerState.health <= playerState.maxHealth * 0.3 ? "#ff6b6b" : "#e5e5e5";
   hudElements.deathMessage.style.display = playerState.isAlive ? "none" : "block";
-  const weaponId = playerState.inventory[playerState.currentWeaponIndex];
-  hudElements.weapon.textContent = `Weapon: ${WEAPONS[weaponId].name}`;
+  renderInventoryUI();
+}
+
+function renderInventoryUI() {
+  if (!hudElements) return;
+  hudElements.inventory.innerHTML = "";
+  const weaponIcons = getWeaponIcons();
+  const maxSlots = Math.max(playerState.inventory.length, 2);
+  for (let i = 0; i < maxSlots; i++) {
+    const slot = document.createElement("div");
+    Object.assign(slot.style, {
+      width: "32px",
+      height: "32px",
+      border: "1px solid rgba(255, 255, 255, 0.25)",
+      background: "rgba(0,0,0,0.35)",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      position: "relative",
+    });
+    if (i < playerState.inventory.length) {
+      const id = playerState.inventory[i];
+      const img = document.createElement("div");
+      Object.assign(img.style, {
+        width: "24px",
+        height: "24px",
+        backgroundImage: `url(${weaponIcons[id]})`,
+        backgroundSize: "contain",
+        backgroundRepeat: "no-repeat",
+      });
+      slot.appendChild(img);
+      if (i === playerState.currentWeaponIndex) {
+        slot.style.border = "1px solid #ffffff";
+        slot.style.boxShadow = "0 0 6px rgba(255,255,255,0.6)";
+      }
+    }
+    hudElements.inventory.appendChild(slot);
+  }
+}
+
+function getWeaponIcons() {
+  if (getWeaponIcons.cache) return getWeaponIcons.cache;
+  const icons = {};
+  icons.bat = createWeaponIcon("#7a5a3a");
+  icons.pistol = createWeaponIcon("#777b88");
+  getWeaponIcons.cache = icons;
+  return icons;
+}
+
+function createWeaponIcon(color) {
+  const size = 24;
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = color;
+  ctx.fillRect(size * 0.2, size * 0.55, size * 0.6, size * 0.2);
+  ctx.fillRect(size * 0.4, size * 0.3, size * 0.2, size * 0.25);
+  ctx.strokeStyle = "#ffffff";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(0, 0, size, size);
+  return canvas.toDataURL();
+}
+
+function getCurrentWeaponId() {
+  if (playerState.currentWeaponIndex < 0 || playerState.currentWeaponIndex >= playerState.inventory.length) {
+    return null;
+  }
+  return playerState.inventory[playerState.currentWeaponIndex];
 }
