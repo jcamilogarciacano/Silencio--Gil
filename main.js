@@ -55,6 +55,15 @@ const HEAL_PICKUPS = [
   { position: new BABYLON.Vector3(8, PICKUP_HEIGHT, -2.5), amount: HEAL_AMOUNT },
 ];
 const HIT_OVERLAY_DURATION = 0.4;
+const ENEMY_SPAWN_INTERVAL = 0.8;
+const ENEMY_SPAWN_POINTS = [
+  new BABYLON.Vector3(-ROAD_LENGTH * 0.6, ENEMY_GROUND_Y, 0),
+  new BABYLON.Vector3(ROAD_LENGTH * 0.6, ENEMY_GROUND_Y, 0),
+  new BABYLON.Vector3(0, ENEMY_GROUND_Y, ROAD_WIDTH * 0.8),
+  new BABYLON.Vector3(0, ENEMY_GROUND_Y, -ROAD_WIDTH * 0.8),
+  new BABYLON.Vector3(-ROAD_LENGTH * 0.55, ENEMY_GROUND_Y, ROAD_WIDTH * 0.7),
+  new BABYLON.Vector3(ROAD_LENGTH * 0.55, ENEMY_GROUND_Y, -ROAD_WIDTH * 0.7),
+];
 const HORDE_START_COUNT = 3;
 const HORDE_INCREMENT = 2;
 const HORDE_BREAK_TIME = 5;
@@ -90,6 +99,8 @@ const hordeState = {
   totalKills: 0,
   breakTimer: 0,
   inBreak: false,
+  spawnQueue: 0,
+  spawnTimer: 0,
 };
 const deathStats = { round: 1, kills: 0 };
 
@@ -136,7 +147,7 @@ function createScene(targetEngine) {
 
   createEnvironment(scene);
   const player = createPlayer(scene);
-  createEnemies(scene, HORDE_START_COUNT);
+  recreateEnemiesForRound(scene, HORDE_START_COUNT);
   hitEffectManager = createHitEffectManager(scene);
   createPickups(scene);
   const cameraRig = setupCamera(scene, player);
@@ -360,42 +371,39 @@ function createLamp(scene, position) {
   head.material = headMat;
 }
 
-function createEnemies(scene, count = ENEMY_COUNT) {
-  enemies.length = 0;
-  const spacing = ROAD_LENGTH / (count + 1);
-  for (let i = 0; i < count; i++) {
-    const x = -ROAD_LENGTH * 0.5 + spacing * (i + 1) + (Math.random() - 0.5) * 2;
-    const z = (Math.random() * 2 - 1) * (ROAD_WIDTH * 0.3);
-    const mesh = BABYLON.MeshBuilder.CreateCapsule(
-      `enemy${i}`,
-      { height: 2.2, radius: 0.4, tessellation: 5 },
-      scene
-    );
-    mesh.position = new BABYLON.Vector3(x, ENEMY_GROUND_Y, z);
-    mesh.rotation.y = Math.random() * Math.PI * 2;
-    mesh.checkCollisions = true;
-    mesh.ellipsoid = new BABYLON.Vector3(0.45, 1.1, 0.45);
-    mesh.ellipsoidOffset = new BABYLON.Vector3(0, 0, 0);
-    mesh.isPickable = false;
+function spawnEnemy(scene) {
+  const spawnPoint = ENEMY_SPAWN_POINTS[Math.floor(Math.random() * ENEMY_SPAWN_POINTS.length)];
+  const mesh = BABYLON.MeshBuilder.CreateCapsule(
+    `enemy-${Date.now()}-${Math.random()}`,
+    { height: 2.2, radius: 0.4, tessellation: 5 },
+    scene
+  );
+  mesh.position = spawnPoint.clone();
+  mesh.rotation.y = Math.random() * Math.PI * 2;
+  mesh.checkCollisions = true;
+  mesh.ellipsoid = new BABYLON.Vector3(0.45, 1.1, 0.45);
+  mesh.ellipsoidOffset = new BABYLON.Vector3(0, 0, 0);
+  mesh.isPickable = false;
 
-    const mat = new BABYLON.StandardMaterial(`enemyMat${i}`, scene);
-    mat.diffuseColor = new BABYLON.Color3(0.35 + Math.random() * 0.05, 0.32, 0.32);
-    mat.emissiveColor = new BABYLON.Color3(0.03, 0.03, 0.03);
-    mat.specularColor = BABYLON.Color3.Black();
-    mesh.material = mat;
+  const mat = new BABYLON.StandardMaterial(`enemyMat-${Math.random()}`, scene);
+  mat.diffuseColor = new BABYLON.Color3(0.35 + Math.random() * 0.05, 0.32, 0.32);
+  mat.emissiveColor = new BABYLON.Color3(0.03, 0.03, 0.03);
+  mat.specularColor = BABYLON.Color3.Black();
+  mesh.material = mat;
 
-    enemies.push({
-      mesh,
-      speed: ENEMY_SPEED + Math.random() * 0.35,
-      health: ENEMY_BASE_HEALTH,
-      maxHealth: ENEMY_BASE_HEALTH,
-      isAlive: true,
-      attackCooldown: 0,
-      idleDir: (Math.random() * 2 - 1) * ENEMY_IDLE_DRIFT,
-      idleTimer: 0.6 + Math.random() * 1.5,
-      spawnPosition: mesh.position.clone(),
-    });
-  }
+  enemies.push({
+    mesh,
+    speed: ENEMY_SPEED + Math.random() * 0.35,
+    health: ENEMY_BASE_HEALTH,
+    maxHealth: ENEMY_BASE_HEALTH,
+    isAlive: true,
+    attackCooldown: 0,
+    idleDir: (Math.random() * 2 - 1) * ENEMY_IDLE_DRIFT,
+    idleTimer: 0.6 + Math.random() * 1.5,
+    spawnPosition: mesh.position.clone(),
+    lastPos: mesh.position.clone(),
+    stuckTimer: 0,
+  });
 }
 
 function createHitEffectManager(scene) {
@@ -521,6 +529,7 @@ function updateEnemies(scene, player, delta) {
     }
 
     aliveCount++;
+    const prevPos = enemy.lastPos || enemy.mesh.position.clone();
     enemy.mesh.isVisible = true;
     const toPlayer = playerPos.subtract(enemy.mesh.position);
     const distance = toPlayer.length();
@@ -546,6 +555,25 @@ function updateEnemies(scene, player, delta) {
     enemy.mesh.moveWithCollisions(scene.gravity.scale(delta)); // pull enemies down to the ground plane
     enemy.mesh.position.y = Math.max(enemy.mesh.position.y, ENEMY_GROUND_Y);
 
+    // Nudge toward center if drifting to sidewalks.
+    if (Math.abs(enemy.mesh.position.z) > targetClamp * 0.9) {
+      const centerYaw = Math.atan2(playerPos.x - enemy.mesh.position.x, playerPos.z - enemy.mesh.position.z);
+      enemy.mesh.rotation.y = BABYLON.Scalar.Lerp(enemy.mesh.rotation.y, centerYaw, delta * 2);
+    }
+
+    // Stuck detection.
+    const moved = BABYLON.Vector3.Distance(prevPos, enemy.mesh.position);
+    if (moved < 0.01) {
+      enemy.stuckTimer = (enemy.stuckTimer || 0) + delta;
+      if (enemy.stuckTimer > 0.6) {
+        enemy.mesh.rotation.y += (Math.random() > 0.5 ? 1 : -1) * Math.PI * 0.5;
+        enemy.stuckTimer = 0;
+      }
+    } else {
+      enemy.stuckTimer = 0;
+    }
+    enemy.lastPos = enemy.mesh.position.clone();
+
     if (distance < ENEMY_ATTACK_RANGE && enemy.attackCooldown <= 0 && playerState.isAlive) {
       applyDamageToPlayer(ENEMY_ATTACK_DAMAGE);
       enemy.attackCooldown = ENEMY_ATTACK_COOLDOWN;
@@ -553,8 +581,8 @@ function updateEnemies(scene, player, delta) {
   });
 
   // If the round is active and all are dead, start break.
-  if (aliveCount === 0 && !hordeState.inBreak) {
-    startBreak();
+  if (aliveCount === 0 && !hordeState.inBreak && hordeState.spawnQueue === 0) {
+    startBreak(scene);
   }
 }
 
@@ -654,6 +682,8 @@ function resetGame(scene, player, cameraRig) {
   hordeState.totalKills = 0;
   hordeState.breakTimer = 0;
   hordeState.inBreak = false;
+  hordeState.spawnQueue = 0;
+  hordeState.spawnTimer = 0;
   recreateEnemiesForRound(scene, HORDE_START_COUNT);
   hitOverlayTime = 0;
   if (hudElements?.hitOverlay) {
@@ -893,7 +923,7 @@ function update(scene, player, cameraRig, inputState, delta) {
     return;
   }
 
-   // Handle break countdown between hordes.
+  // Handle break countdown between hordes (player can still move).
   if (hordeState.inBreak) {
     hordeState.breakTimer -= delta;
     if (hordeState.breakTimer <= 0) {
@@ -902,13 +932,6 @@ function update(scene, player, cameraRig, inputState, delta) {
       const enemyCount = HORDE_START_COUNT + (hordeState.round - 1) * HORDE_INCREMENT;
       recreateEnemiesForRound(scene, enemyCount);
     }
-    updateCameraRig(cameraRig, player, delta, false);
-    updateHitEffects(delta);
-    updateHUD();
-    inputState.attackPressed = false;
-    inputState.usePressed = false;
-    inputState.restartPressed = false;
-    return;
   }
 
   const forward = (inputState.forward ? 1 : 0) + (inputState.backward ? -1 : 0);
@@ -940,6 +963,15 @@ function update(scene, player, cameraRig, inputState, delta) {
 
   updatePickups(player);
   updateEnemies(scene, player, delta);
+  // Spawn queue for current horde.
+  if (!hordeState.inBreak && hordeState.spawnQueue > 0) {
+    hordeState.spawnTimer -= delta;
+    if (hordeState.spawnTimer <= 0) {
+      spawnEnemy(scene);
+      hordeState.spawnQueue -= 1;
+      hordeState.spawnTimer = ENEMY_SPAWN_INTERVAL;
+    }
+  }
   updateHitEffects(delta);
   updateCameraRig(cameraRig, player, delta, isMoving);
   updateHUD();
@@ -1227,13 +1259,17 @@ function useCurrentItem() {
 
 function recreateEnemiesForRound(scene, count) {
   enemies.forEach((e) => e.mesh?.dispose?.());
-  createEnemies(scene, count);
+  enemies.length = 0;
+  hordeState.spawnQueue = count;
+  hordeState.spawnTimer = 0;
   hordeState.killsThisRound = 0;
 }
 
-function startBreak() {
+function startBreak(scene) {
   hordeState.inBreak = true;
   hordeState.breakTimer = HORDE_BREAK_TIME;
+  hordeState.spawnQueue = 0;
+  hordeState.spawnTimer = 0;
   // Spawn a heal pickup each break.
   const healMesh = BABYLON.MeshBuilder.CreateBox(`heal-break-${Date.now()}`, { size: 0.7 }, scene);
   const mat = new BABYLON.StandardMaterial(`heal-break-mat-${Date.now()}`, scene);
