@@ -35,6 +35,8 @@ const ENEMY_ATTACK_COOLDOWN = 1.1;
 const ENEMY_DETECTION_RADIUS = 20;
 const ENEMY_IDLE_DRIFT = 0.6;
 const DEATH_SINK_SPEED = 1.5;
+const PLAYER_X_LIMIT = ROAD_LENGTH * 0.5;
+const PLAYER_Z_LIMIT = ROAD_WIDTH * 0.5 + SIDEWALK_WIDTH * 0.5;
 const WEAPONS = {
   bat: { name: "Bat", range: 2.8, damage: 18, cooldown: 0.5, cone: 60 },
   pistol: { name: "Pistol", range: 10, damage: 12, cooldown: 0.6, cone: 20 },
@@ -208,11 +210,11 @@ function createEnvironment(scene) {
   leftBarrier.position = new BABYLON.Vector3(0, barrierHeight * 0.5, ROAD_WIDTH * 0.5 + SIDEWALK_WIDTH + barrierDepth * 0.5);
   leftBarrier.isVisible = false;
   leftBarrier.material = barrierMat;
-  leftBarrier.checkCollisions = true;
+  leftBarrier.checkCollisions = false; // keep only as visual/placement guide; player clamped manually
 
   const rightBarrier = leftBarrier.clone("barrierRight");
   rightBarrier.position.z *= -1;
-  rightBarrier.checkCollisions = true;
+  rightBarrier.checkCollisions = false;
 
   const endBarrierSpan = ROAD_WIDTH + SIDEWALK_WIDTH * 2 + barrierDepth * 2;
   const frontBarrier = BABYLON.MeshBuilder.CreateBox(
@@ -223,11 +225,11 @@ function createEnvironment(scene) {
   frontBarrier.position = new BABYLON.Vector3(ROAD_LENGTH * 0.5 + barrierDepth * 0.5, barrierHeight * 0.5, 0);
   frontBarrier.isVisible = false;
   frontBarrier.material = barrierMat;
-  frontBarrier.checkCollisions = true;
+  frontBarrier.checkCollisions = false;
 
   const backBarrier = frontBarrier.clone("barrierBack");
   backBarrier.position.x *= -1;
-  backBarrier.checkCollisions = true;
+  backBarrier.checkCollisions = false;
 
   // Buildings and props.
   const buildingPositions = [-20, -10, 0, 10, 20];
@@ -951,6 +953,7 @@ function update(scene, player, cameraRig, inputState, delta) {
 
   // Gravity keeps the capsule grounded and prevents clipping through raised props.
   player.moveWithCollisions(scene.gravity.scale(delta));
+  clampPlayerPosition(player);
 
   const isMoving = forward !== 0;
 
@@ -1255,6 +1258,11 @@ function useCurrentItem() {
     }
     updateHUD();
   }
+}
+
+function clampPlayerPosition(player) {
+  player.position.x = BABYLON.Scalar.Clamp(player.position.x, -PLAYER_X_LIMIT, PLAYER_X_LIMIT);
+  player.position.z = BABYLON.Scalar.Clamp(player.position.z, -PLAYER_Z_LIMIT, PLAYER_Z_LIMIT);
 }
 
 function recreateEnemiesForRound(scene, count) {
