@@ -44,10 +44,17 @@ const HIT_EFFECT_SIZE = 1.1;
 const ENEMY_GROUND_Y = 1.1;
 const PICKUP_RADIUS = 1.4;
 const PICKUP_HEIGHT = 0.4;
+const INVENTORY_SLOTS = 10;
+const HEAL_AMOUNT = 35;
 const WEAPON_PICKUPS = [
   { type: "bat", position: new BABYLON.Vector3(-10, PICKUP_HEIGHT, 0) },
   { type: "pistol", position: new BABYLON.Vector3(12, PICKUP_HEIGHT, 1.2) },
 ];
+const HEAL_PICKUPS = [
+  { position: new BABYLON.Vector3(-5, PICKUP_HEIGHT, 3), amount: HEAL_AMOUNT },
+  { position: new BABYLON.Vector3(8, PICKUP_HEIGHT, -2.5), amount: HEAL_AMOUNT },
+];
+const HIT_OVERLAY_DURATION = 0.4;
 
 const canvas = document.getElementById("renderCanvas");
 const engine = new BABYLON.Engine(canvas, false, {
@@ -73,6 +80,7 @@ let hudElements = null;
 let hitEffectManager = null;
 const hitEffects = [];
 const pickups = [];
+let hitOverlayTime = 0;
 
 engine.resize();
 resizeForPixelLook(engine);
@@ -119,7 +127,7 @@ function createScene(targetEngine) {
   const player = createPlayer(scene);
   createEnemies(scene);
   hitEffectManager = createHitEffectManager(scene);
-  createWeaponPickups(scene);
+  createPickups(scene);
   const cameraRig = setupCamera(scene, player);
   const inputState = setupInput(scene, player, cameraRig);
   hudElements = createHUD();
@@ -423,7 +431,7 @@ function updateHitEffects(delta) {
   }
 }
 
-function createWeaponPickups(scene) {
+function createPickups(scene) {
   pickups.length = 0;
   WEAPON_PICKUPS.forEach((pickup, index) => {
     const mesh = BABYLON.MeshBuilder.CreateBox(`pickup-${pickup.type}-${index}`, { size: 0.8 }, scene);
@@ -434,7 +442,19 @@ function createWeaponPickups(scene) {
     mat.specularColor = BABYLON.Color3.Black();
     mesh.material = mat;
     mesh.checkCollisions = false;
-    pickups.push({ mesh, type: pickup.type, collected: false });
+    pickups.push({ mesh, kind: "weapon", id: pickup.type, collected: false });
+  });
+
+  HEAL_PICKUPS.forEach((pickup, index) => {
+    const mesh = BABYLON.MeshBuilder.CreateBox(`heal-${index}`, { size: 0.7 }, scene);
+    mesh.position = pickup.position.clone();
+    const mat = new BABYLON.StandardMaterial(`heal-mat-${index}`, scene);
+    mat.diffuseColor = new BABYLON.Color3(0.3, 0.8, 0.4);
+    mat.emissiveColor = new BABYLON.Color3(0.1, 0.4, 0.2);
+    mat.specularColor = BABYLON.Color3.Black();
+    mesh.material = mat;
+    mesh.checkCollisions = false;
+    pickups.push({ mesh, kind: "heal", id: "heal", amount: pickup.amount, collected: false });
   });
 }
 
@@ -452,15 +472,22 @@ function updatePickups(player) {
     if (pickup.collected || !pickup.mesh || pickup.mesh.isDisposed()) return;
     const dist = BABYLON.Vector3.Distance(player.position, pickup.mesh.position);
     if (dist < PICKUP_RADIUS) {
+      if (playerState.inventory.length >= INVENTORY_SLOTS) {
+        return;
+      }
       pickup.collected = true;
       pickup.mesh.isVisible = false;
-      if (!playerState.inventory.includes(pickup.type)) {
-        playerState.inventory.push(pickup.type);
-        if (playerState.currentWeaponIndex === -1) {
-          playerState.currentWeaponIndex = 0;
+      if (pickup.kind === "weapon") {
+        if (!playerState.inventory.some((item) => item.id === pickup.id && item.kind === "weapon")) {
+          playerState.inventory.push({ kind: "weapon", id: pickup.id });
         }
-        updateHUD();
+      } else if (pickup.kind === "heal") {
+        playerState.inventory.push({ kind: "heal", id: "heal", amount: pickup.amount });
       }
+      if (playerState.currentWeaponIndex === -1) {
+        playerState.currentWeaponIndex = 0;
+      }
+      updateHUD();
     }
   });
 }
@@ -601,6 +628,10 @@ function resetGame(scene, player, cameraRig) {
   playerState.currentWeaponIndex = -1;
   resetPickups();
   respawnEnemies();
+  hitOverlayTime = 0;
+  if (hudElements?.hitOverlay) {
+    hudElements.hitOverlay.style.opacity = "0";
+  }
   cameraRig.smoothedPosition = player.position.clone().add(new BABYLON.Vector3(0, CAMERA_HEIGHT, -CAMERA_DISTANCE));
   cameraRig.target = player.position.clone();
   cameraRig.yaw = 0;
@@ -624,6 +655,7 @@ function respawnEnemies() {
 function applyDamageToPlayer(amount) {
   if (!playerState.isAlive) return;
   playerState.health = Math.max(0, playerState.health - amount);
+  hitOverlayTime = HIT_OVERLAY_DURATION;
   if (playerState.health <= 0) {
     playerState.isAlive = false;
   }
@@ -657,6 +689,7 @@ function setupInput(scene, player, cameraRig) {
     attackPressed: false,
     restartPressed: false,
     switchTo: null,
+    usePressed: false,
   };
 
   const keyMap = {
@@ -692,6 +725,42 @@ function setupInput(scene, player, cameraRig) {
     }
     if ((event.code === "Digit2" || event.code === "Numpad2") && !event.repeat) {
       state.switchTo = 1;
+      event.preventDefault();
+    }
+    if ((event.code === "Digit3" || event.code === "Numpad3") && !event.repeat) {
+      state.switchTo = 2;
+      event.preventDefault();
+    }
+    if ((event.code === "Digit4" || event.code === "Numpad4") && !event.repeat) {
+      state.switchTo = 3;
+      event.preventDefault();
+    }
+    if ((event.code === "Digit5" || event.code === "Numpad5") && !event.repeat) {
+      state.switchTo = 4;
+      event.preventDefault();
+    }
+    if ((event.code === "Digit6" || event.code === "Numpad6") && !event.repeat) {
+      state.switchTo = 5;
+      event.preventDefault();
+    }
+    if ((event.code === "Digit7" || event.code === "Numpad7") && !event.repeat) {
+      state.switchTo = 6;
+      event.preventDefault();
+    }
+    if ((event.code === "Digit8" || event.code === "Numpad8") && !event.repeat) {
+      state.switchTo = 7;
+      event.preventDefault();
+    }
+    if ((event.code === "Digit9" || event.code === "Numpad9") && !event.repeat) {
+      state.switchTo = 8;
+      event.preventDefault();
+    }
+    if ((event.code === "Digit0" || event.code === "Numpad0") && !event.repeat) {
+      state.switchTo = 9;
+      event.preventDefault();
+    }
+    if (event.code === "KeyE" && !event.repeat) {
+      state.usePressed = true;
       event.preventDefault();
     }
   });
@@ -768,6 +837,11 @@ function setupAmbientAudio() {
 function update(scene, player, cameraRig, inputState, delta) {
   playerState.attackCooldown = Math.max(0, playerState.attackCooldown - delta);
   playerState.attackAnimTime = Math.max(0, playerState.attackAnimTime - delta);
+  hitOverlayTime = Math.max(0, hitOverlayTime - delta);
+  if (hudElements?.hitOverlay) {
+    const t = Math.max(0, Math.min(1, hitOverlayTime / HIT_OVERLAY_DURATION));
+    hudElements.hitOverlay.style.opacity = (t * 0.6).toFixed(2);
+  }
 
   if (inputState.restartPressed && !playerState.isAlive) {
     resetGame(scene, player, cameraRig);
@@ -813,6 +887,9 @@ function update(scene, player, cameraRig, inputState, delta) {
   if (inputState.attackPressed) {
     handlePlayerAttack(player);
   }
+  if (inputState.usePressed) {
+    useCurrentItem();
+  }
 
   updatePickups(player);
   updateEnemies(scene, player, delta);
@@ -822,6 +899,7 @@ function update(scene, player, cameraRig, inputState, delta) {
 
   inputState.attackPressed = false;
   inputState.restartPressed = false;
+  inputState.usePressed = false;
 }
 
 function updateCameraRig(cameraRig, player, delta, isMoving) {
@@ -892,19 +970,40 @@ function createHUD() {
   const hp = document.createElement("div");
   hp.textContent = `HP: ${playerState.health} / ${playerState.maxHealth}`;
 
+  const hpBarWrapper = document.createElement("div");
+  Object.assign(hpBarWrapper.style, {
+    width: "140px",
+    height: "10px",
+    border: "1px solid rgba(255,255,255,0.35)",
+    background: "rgba(0,0,0,0.4)",
+    marginTop: "4px",
+  });
+  const hpBarFill = document.createElement("div");
+  Object.assign(hpBarFill.style, {
+    width: "100%",
+    height: "100%",
+    background: "linear-gradient(90deg, #5cff8d, #2ecc71)",
+    transition: "width 0.1s linear",
+  });
+  hpBarWrapper.appendChild(hpBarFill);
+
   const inventory = document.createElement("div");
   Object.assign(inventory.style, {
+    position: "fixed",
+    bottom: "16px",
+    left: "50%",
+    transform: "translateX(-50%)",
     display: "flex",
     gap: "6px",
-    marginTop: "6px",
     alignItems: "center",
+    pointerEvents: "none",
   });
 
   const controls = document.createElement("div");
-  controls.innerHTML = "Space: attack<br>1/2: switch weapon<br>R: restart when dead";
+  controls.innerHTML = "Space: attack | E: use item | 1-0: select slot | R: restart";
 
   container.appendChild(hp);
-  container.appendChild(inventory);
+  container.appendChild(hpBarWrapper);
   container.appendChild(controls);
   document.body.appendChild(container);
 
@@ -927,7 +1026,24 @@ function createHUD() {
   });
   document.body.appendChild(deathMessage);
 
-  return { container, hp, inventory, controls, deathMessage };
+  const hitOverlay = document.createElement("div");
+  Object.assign(hitOverlay.style, {
+    position: "fixed",
+    top: 0,
+    left: 0,
+    width: "100%",
+    height: "100%",
+    background: "rgba(255,0,0,0.4)",
+    pointerEvents: "none",
+    mixBlendMode: "screen",
+    opacity: 0,
+    transition: "opacity 0.05s linear",
+  });
+  document.body.appendChild(hitOverlay);
+
+  document.body.appendChild(inventory);
+
+  return { container, hp, hpBarFill, inventory, controls, deathMessage, hitOverlay };
 }
 
 function updateHUD() {
@@ -936,6 +1052,10 @@ function updateHUD() {
   hudElements.hp.textContent = `HP: ${hpValue} / ${playerState.maxHealth}`;
   hudElements.hp.style.color = playerState.health <= playerState.maxHealth * 0.3 ? "#ff6b6b" : "#e5e5e5";
   hudElements.deathMessage.style.display = playerState.isAlive ? "none" : "block";
+  const hpPct = Math.max(0, Math.min(1, playerState.health / playerState.maxHealth));
+  if (hudElements.hpBarFill) {
+    hudElements.hpBarFill.style.width = `${hpPct * 100}%`;
+  }
   renderInventoryUI();
 }
 
@@ -943,7 +1063,7 @@ function renderInventoryUI() {
   if (!hudElements) return;
   hudElements.inventory.innerHTML = "";
   const weaponIcons = getWeaponIcons();
-  const maxSlots = Math.max(playerState.inventory.length, 2);
+  const maxSlots = Math.max(playerState.inventory.length, INVENTORY_SLOTS);
   for (let i = 0; i < maxSlots; i++) {
     const slot = document.createElement("div");
     Object.assign(slot.style, {
@@ -957,15 +1077,19 @@ function renderInventoryUI() {
       position: "relative",
     });
     if (i < playerState.inventory.length) {
-      const id = playerState.inventory[i];
+      const item = playerState.inventory[i];
+      const id = item.id;
       const img = document.createElement("div");
       Object.assign(img.style, {
         width: "24px",
         height: "24px",
-        backgroundImage: `url(${weaponIcons[id]})`,
+        backgroundImage: `url(${weaponIcons[id] || weaponIcons.generic})`,
         backgroundSize: "contain",
         backgroundRepeat: "no-repeat",
       });
+      if (item.kind === "heal") {
+        img.style.filter = "drop-shadow(0 0 4px #5cff8d)";
+      }
       slot.appendChild(img);
       if (i === playerState.currentWeaponIndex) {
         slot.style.border = "1px solid #ffffff";
@@ -981,6 +1105,8 @@ function getWeaponIcons() {
   const icons = {};
   icons.bat = createWeaponIcon("#7a5a3a");
   icons.pistol = createWeaponIcon("#777b88");
+  icons.heal = createWeaponIcon("#5cff8d");
+  icons.generic = createWeaponIcon("#bbbbbb");
   getWeaponIcons.cache = icons;
   return icons;
 }
@@ -1001,8 +1127,22 @@ function createWeaponIcon(color) {
 }
 
 function getCurrentWeaponId() {
-  if (playerState.currentWeaponIndex < 0 || playerState.currentWeaponIndex >= playerState.inventory.length) {
-    return null;
+  const item = playerState.inventory[playerState.currentWeaponIndex];
+  if (!item || item.kind !== "weapon") return null;
+  return item.id;
+}
+
+function useCurrentItem() {
+  const idx = playerState.currentWeaponIndex;
+  if (idx < 0 || idx >= playerState.inventory.length) return;
+  const item = playerState.inventory[idx];
+  if (item.kind === "heal") {
+    const newHealth = Math.min(playerState.maxHealth, playerState.health + (item.amount || HEAL_AMOUNT));
+    playerState.health = newHealth;
+    playerState.inventory.splice(idx, 1);
+    if (playerState.currentWeaponIndex >= playerState.inventory.length) {
+      playerState.currentWeaponIndex = playerState.inventory.length - 1;
+    }
+    updateHUD();
   }
-  return playerState.inventory[playerState.currentWeaponIndex];
 }
