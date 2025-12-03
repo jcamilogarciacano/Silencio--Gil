@@ -35,6 +35,12 @@ const ENEMY_ATTACK_COOLDOWN = 1.1;
 const ENEMY_DETECTION_RADIUS = 20;
 const ENEMY_IDLE_DRIFT = 0.6;
 const DEATH_SINK_SPEED = 0.6;
+const WEAPONS = {
+  bat: { name: "Bat", range: 2.8, damage: 18, cooldown: 0.5, cone: 60 },
+  pistol: { name: "Pistol", range: 10, damage: 12, cooldown: 0.6, cone: 20 },
+};
+const HIT_EFFECT_LIFETIME = 0.25;
+const HIT_EFFECT_SIZE = 1.1;
 
 const canvas = document.getElementById("renderCanvas");
 const engine = new BABYLON.Engine(canvas, false, {
@@ -53,8 +59,12 @@ const playerState = {
   attackRange: PLAYER_ATTACK_RANGE,
   attackDamage: PLAYER_ATTACK_DAMAGE,
   attackAnimTime: 0,
+  inventory: ["bat", "pistol"],
+  currentWeaponIndex: 0,
 };
 let hudElements = null;
+let hitEffectManager = null;
+const hitEffects = [];
 
 engine.resize();
 resizeForPixelLook(engine);
@@ -100,6 +110,7 @@ function createScene(targetEngine) {
   createEnvironment(scene);
   const player = createPlayer(scene);
   createEnemies(scene);
+  hitEffectManager = createHitEffectManager(scene);
   const cameraRig = setupCamera(scene, player);
   const inputState = setupInput(scene, player, cameraRig);
   hudElements = createHUD();
@@ -359,6 +370,50 @@ function createEnemies(scene) {
   }
 }
 
+function createHitEffectManager(scene) {
+  const size = 64;
+  const tex = new BABYLON.DynamicTexture("hitEffectTex", { width: size, height: size }, scene, false);
+  const ctx = tex.getContext();
+  ctx.imageSmoothingEnabled = false;
+  ctx.clearRect(0, 0, size, size);
+  ctx.fillStyle = "#ffffff";
+  ctx.globalAlpha = 1;
+  // Simple star burst
+  ctx.fillRect(size / 2 - 1, 0, 2, size);
+  ctx.fillRect(0, size / 2 - 1, size, 2);
+  ctx.fillRect(size / 2 - 3, size / 2 - 3, 6, 6);
+  tex.update(false);
+  tex.updateSamplingMode(BABYLON.Texture.NEAREST_SAMPLINGMODE);
+
+  const manager = new BABYLON.SpriteManager("hitEffects", "", 32, { width: size, height: size }, scene);
+  manager.texture = tex;
+  return manager;
+}
+
+function spawnHitEffect(position) {
+  if (!hitEffectManager) return;
+  const sprite = new BABYLON.Sprite("hit", hitEffectManager);
+  sprite.position = position.clone().add(new BABYLON.Vector3(0, 1.0, 0));
+  sprite.size = HIT_EFFECT_SIZE;
+  sprite.color = new BABYLON.Color4(1, 1, 1, 1);
+  sprite.angle = Math.random() * Math.PI * 2;
+  hitEffects.push({ sprite, life: HIT_EFFECT_LIFETIME });
+}
+
+function updateHitEffects(delta) {
+  for (let i = hitEffects.length - 1; i >= 0; i--) {
+    const effect = hitEffects[i];
+    effect.life -= delta;
+    const t = Math.max(0, effect.life / HIT_EFFECT_LIFETIME);
+    effect.sprite.color.a = t;
+    effect.sprite.size = BABYLON.Scalar.Lerp(0.3, HIT_EFFECT_SIZE, t);
+    if (effect.life <= 0) {
+      effect.sprite.dispose();
+      hitEffects.splice(i, 1);
+    }
+  }
+}
+
 function updateEnemies(scene, player, delta) {
   const targetClamp = ROAD_WIDTH * 0.45;
   const playerPos = player.position;
@@ -425,22 +480,55 @@ function createPlayer(scene) {
 
 function handlePlayerAttack(player) {
   if (!playerState.isAlive || playerState.attackCooldown > 0) return;
-  playerState.attackCooldown = PLAYER_ATTACK_COOLDOWN;
+  const weaponId = playerState.inventory[playerState.currentWeaponIndex];
+  const weapon = WEAPONS[weaponId] || WEAPONS.bat;
+  playerState.attackCooldown = weapon.cooldown;
   playerState.attackAnimTime = PLAYER_ATTACK_ANIM;
 
   const forwardDir = new BABYLON.Vector3(Math.sin(player.rotation.y), 0, Math.cos(player.rotation.y)).normalize();
-  const hitThreshold = Math.cos(BABYLON.Tools.ToRadians(60));
+  const hitThreshold = Math.cos(BABYLON.Tools.ToRadians(weapon.cone));
+  const weaponRange = weapon.range;
+  const weaponDamage = weapon.damage;
+
+  if (weaponId === "pistol") {
+    // Narrow cone, pick nearest in arc to simulate hitscan.
+    let bestEnemy = null;
+    let bestDist = Number.MAX_VALUE;
+    enemies.forEach((enemy) => {
+      if (!enemy.isAlive || !enemy.mesh || enemy.mesh.isDisposed()) return;
+      const toEnemy = enemy.mesh.position.subtract(player.position);
+      const distance = toEnemy.length();
+      if (distance > weaponRange) return;
+      const dir = toEnemy.normalize();
+      const alignment = BABYLON.Vector3.Dot(forwardDir, dir);
+      if (alignment < hitThreshold) return;
+      if (distance < bestDist) {
+        bestDist = distance;
+        bestEnemy = enemy;
+      }
+    });
+    if (bestEnemy) {
+      bestEnemy.health -= weaponDamage;
+      spawnHitEffect(bestEnemy.mesh.position);
+      if (bestEnemy.health <= 0) {
+        bestEnemy.health = 0;
+        bestEnemy.isAlive = false;
+      }
+    }
+    return;
+  }
 
   enemies.forEach((enemy) => {
     if (!enemy.isAlive || !enemy.mesh || enemy.mesh.isDisposed()) return;
     const toEnemy = enemy.mesh.position.subtract(player.position);
     const distance = toEnemy.length();
-    if (distance > playerState.attackRange) return;
+    if (distance > weaponRange) return;
     const dir = toEnemy.normalize();
     const alignment = BABYLON.Vector3.Dot(forwardDir, dir);
     if (alignment < hitThreshold) return;
 
-    enemy.health -= playerState.attackDamage;
+    enemy.health -= weaponDamage;
+    spawnHitEffect(enemy.mesh.position);
     if (enemy.health <= 0) {
       enemy.health = 0;
       enemy.isAlive = false;
@@ -511,6 +599,7 @@ function setupInput(scene, player, cameraRig) {
     pointerLocked: false,
     attackPressed: false,
     restartPressed: false,
+    switchTo: null,
   };
 
   const keyMap = {
@@ -538,6 +627,14 @@ function setupInput(scene, player, cameraRig) {
     }
     if (event.code === "KeyR" && !event.repeat) {
       state.restartPressed = true;
+      event.preventDefault();
+    }
+    if ((event.code === "Digit1" || event.code === "Numpad1") && !event.repeat) {
+      state.switchTo = 0;
+      event.preventDefault();
+    }
+    if ((event.code === "Digit2" || event.code === "Numpad2") && !event.repeat) {
+      state.switchTo = 1;
       event.preventDefault();
     }
   });
@@ -619,8 +716,17 @@ function update(scene, player, cameraRig, inputState, delta) {
     resetGame(scene, player, cameraRig);
   }
 
+  if (inputState.switchTo !== null) {
+    if (inputState.switchTo >= 0 && inputState.switchTo < playerState.inventory.length) {
+      playerState.currentWeaponIndex = inputState.switchTo;
+      updateHUD();
+    }
+    inputState.switchTo = null;
+  }
+
   if (!playerState.isAlive) {
     updateCameraRig(cameraRig, player, delta, false);
+    updateHitEffects(delta);
     updateHUD();
     inputState.attackPressed = false;
     inputState.restartPressed = false;
@@ -652,6 +758,7 @@ function update(scene, player, cameraRig, inputState, delta) {
   }
 
   updateEnemies(scene, player, delta);
+  updateHitEffects(delta);
   updateCameraRig(cameraRig, player, delta, isMoving);
   updateHUD();
 
@@ -727,10 +834,14 @@ function createHUD() {
   const hp = document.createElement("div");
   hp.textContent = `HP: ${playerState.health} / ${playerState.maxHealth}`;
 
+  const weapon = document.createElement("div");
+  weapon.textContent = `Weapon: ${WEAPONS[playerState.inventory[playerState.currentWeaponIndex]].name}`;
+
   const controls = document.createElement("div");
-  controls.innerHTML = "Space: melee attack<br>R: restart when dead";
+  controls.innerHTML = "Space: attack<br>1/2: switch weapon<br>R: restart when dead";
 
   container.appendChild(hp);
+  container.appendChild(weapon);
   container.appendChild(controls);
   document.body.appendChild(container);
 
@@ -753,7 +864,7 @@ function createHUD() {
   });
   document.body.appendChild(deathMessage);
 
-  return { container, hp, controls, deathMessage };
+  return { container, hp, weapon, controls, deathMessage };
 }
 
 function updateHUD() {
@@ -762,4 +873,6 @@ function updateHUD() {
   hudElements.hp.textContent = `HP: ${hpValue} / ${playerState.maxHealth}`;
   hudElements.hp.style.color = playerState.health <= playerState.maxHealth * 0.3 ? "#ff6b6b" : "#e5e5e5";
   hudElements.deathMessage.style.display = playerState.isAlive ? "none" : "block";
+  const weaponId = playerState.inventory[playerState.currentWeaponIndex];
+  hudElements.weapon.textContent = `Weapon: ${WEAPONS[weaponId].name}`;
 }
