@@ -21,6 +21,20 @@ const ROAD_LENGTH = 50;
 const ROAD_WIDTH = 12;
 const SIDEWALK_WIDTH = 1.2;
 const SIDEWALK_HEIGHT = 0.18;
+const PLAYER_MAX_HEALTH = 100;
+const PLAYER_ATTACK_COOLDOWN = 0.45;
+const PLAYER_ATTACK_RANGE = 2.5;
+const PLAYER_ATTACK_DAMAGE = 15;
+const PLAYER_ATTACK_ANIM = 0.22;
+const ENEMY_COUNT = 5;
+const ENEMY_BASE_HEALTH = 30;
+const ENEMY_SPEED = 1.2;
+const ENEMY_ATTACK_RANGE = 1.8;
+const ENEMY_ATTACK_DAMAGE = 8;
+const ENEMY_ATTACK_COOLDOWN = 1.1;
+const ENEMY_DETECTION_RADIUS = 20;
+const ENEMY_IDLE_DRIFT = 0.6;
+const DEATH_SINK_SPEED = 0.6;
 
 const canvas = document.getElementById("renderCanvas");
 const engine = new BABYLON.Engine(canvas, false, {
@@ -29,6 +43,18 @@ const engine = new BABYLON.Engine(canvas, false, {
   stencil: true,
   adaptToDeviceRatio: false,
 });
+
+const enemies = [];
+const playerState = {
+  health: PLAYER_MAX_HEALTH,
+  maxHealth: PLAYER_MAX_HEALTH,
+  isAlive: true,
+  attackCooldown: 0,
+  attackRange: PLAYER_ATTACK_RANGE,
+  attackDamage: PLAYER_ATTACK_DAMAGE,
+  attackAnimTime: 0,
+};
+let hudElements = null;
 
 engine.resize();
 resizeForPixelLook(engine);
@@ -73,12 +99,16 @@ function createScene(targetEngine) {
 
   createEnvironment(scene);
   const player = createPlayer(scene);
+  createEnemies(scene);
   const cameraRig = setupCamera(scene, player);
   const inputState = setupInput(scene, player, cameraRig);
+  hudElements = createHUD();
+  updateHUD();
   setupAmbientAudio();
 
   scene.registerBeforeRender(() => {
-    update(scene, player, cameraRig, inputState);
+    const delta = scene.getEngine().getDeltaTime() / 1000;
+    update(scene, player, cameraRig, inputState, delta);
   });
 
   return scene;
@@ -291,22 +321,167 @@ function createLamp(scene, position) {
   head.material = headMat;
 }
 
+function createEnemies(scene) {
+  enemies.length = 0;
+  const spacing = ROAD_LENGTH / (ENEMY_COUNT + 1);
+  for (let i = 0; i < ENEMY_COUNT; i++) {
+    const x = -ROAD_LENGTH * 0.5 + spacing * (i + 1) + (Math.random() - 0.5) * 2;
+    const z = (Math.random() * 2 - 1) * (ROAD_WIDTH * 0.3);
+    const mesh = BABYLON.MeshBuilder.CreateCapsule(
+      `enemy${i}`,
+      { height: 2.2, radius: 0.4, tessellation: 5 },
+      scene
+    );
+    mesh.position = new BABYLON.Vector3(x, 1.1, z);
+    mesh.rotation.y = Math.random() * Math.PI * 2;
+    mesh.checkCollisions = true;
+    mesh.ellipsoid = new BABYLON.Vector3(0.45, 1.1, 0.45);
+    mesh.ellipsoidOffset = new BABYLON.Vector3(0, 0, 0);
+    mesh.isPickable = false;
+
+    const mat = new BABYLON.StandardMaterial(`enemyMat${i}`, scene);
+    mat.diffuseColor = new BABYLON.Color3(0.35 + Math.random() * 0.05, 0.32, 0.32);
+    mat.emissiveColor = new BABYLON.Color3(0.03, 0.03, 0.03);
+    mat.specularColor = BABYLON.Color3.Black();
+    mesh.material = mat;
+
+    enemies.push({
+      mesh,
+      speed: ENEMY_SPEED + Math.random() * 0.35,
+      health: ENEMY_BASE_HEALTH,
+      maxHealth: ENEMY_BASE_HEALTH,
+      isAlive: true,
+      attackCooldown: 0,
+      idleDir: (Math.random() * 2 - 1) * ENEMY_IDLE_DRIFT,
+      idleTimer: 0.6 + Math.random() * 1.5,
+      spawnPosition: mesh.position.clone(),
+    });
+  }
+}
+
+function updateEnemies(scene, player, delta) {
+  const targetClamp = ROAD_WIDTH * 0.45;
+  const playerPos = player.position;
+
+  enemies.forEach((enemy) => {
+    if (!enemy.mesh || enemy.mesh.isDisposed()) return;
+    enemy.attackCooldown = Math.max(0, enemy.attackCooldown - delta);
+
+    if (!enemy.isAlive) {
+      enemy.mesh.position.y -= delta * DEATH_SINK_SPEED;
+      if (enemy.mesh.position.y < -1.5) {
+        enemy.mesh.isVisible = false;
+      }
+      return;
+    }
+
+    enemy.mesh.isVisible = true;
+    const toPlayer = playerPos.subtract(enemy.mesh.position);
+    const distance = toPlayer.length();
+
+    if (distance < ENEMY_DETECTION_RADIUS) {
+      const targetYaw = Math.atan2(toPlayer.x, toPlayer.z);
+      const currentYaw = enemy.mesh.rotation.y;
+      enemy.mesh.rotation.y = currentYaw + (targetYaw - currentYaw) * Math.min(1, delta * 6);
+
+      const forward = new BABYLON.Vector3(Math.sin(enemy.mesh.rotation.y), 0, Math.cos(enemy.mesh.rotation.y));
+      const step = forward.scale(enemy.speed * delta);
+      enemy.mesh.moveWithCollisions(step);
+    } else {
+      enemy.idleTimer -= delta;
+      if (enemy.idleTimer <= 0) {
+        enemy.idleDir = (Math.random() * 2 - 1) * ENEMY_IDLE_DRIFT;
+        enemy.idleTimer = 0.8 + Math.random() * 1.4;
+      }
+      enemy.mesh.position.z += enemy.idleDir * delta;
+    }
+
+    enemy.mesh.position.z = BABYLON.Scalar.Clamp(enemy.mesh.position.z, -targetClamp, targetClamp);
+
+    if (distance < ENEMY_ATTACK_RANGE && enemy.attackCooldown <= 0 && playerState.isAlive) {
+      applyDamageToPlayer(ENEMY_ATTACK_DAMAGE);
+      enemy.attackCooldown = ENEMY_ATTACK_COOLDOWN;
+    }
+  });
+}
+
 function createPlayer(scene) {
   const player = BABYLON.MeshBuilder.CreateCapsule(
     "player",
     { height: 1.8, radius: 0.35, tessellation: 6 },
     scene
   );
-  player.position = new BABYLON.Vector3(0, 1, 0);
+  player.position = new BABYLON.Vector3(0, 0.9, 0);
   const mat = new BABYLON.StandardMaterial("playerMat", scene);
   mat.diffuseColor = new BABYLON.Color3(0.65, 0.65, 0.65);
   mat.emissiveColor = new BABYLON.Color3(0.05, 0.05, 0.05);
   mat.specularColor = BABYLON.Color3.Black();
   player.material = mat;
   player.ellipsoid = new BABYLON.Vector3(0.4, 0.9, 0.4);
-  player.ellipsoidOffset = new BABYLON.Vector3(0, 0.9, 0);
+  player.ellipsoidOffset = new BABYLON.Vector3(0, 0, 0);
   player.checkCollisions = true;
   return player;
+}
+
+function handlePlayerAttack(player) {
+  if (!playerState.isAlive || playerState.attackCooldown > 0) return;
+  playerState.attackCooldown = PLAYER_ATTACK_COOLDOWN;
+  playerState.attackAnimTime = PLAYER_ATTACK_ANIM;
+
+  const forwardDir = new BABYLON.Vector3(Math.sin(player.rotation.y), 0, Math.cos(player.rotation.y)).normalize();
+  const hitThreshold = Math.cos(BABYLON.Tools.ToRadians(60));
+
+  enemies.forEach((enemy) => {
+    if (!enemy.isAlive || !enemy.mesh || enemy.mesh.isDisposed()) return;
+    const toEnemy = enemy.mesh.position.subtract(player.position);
+    const distance = toEnemy.length();
+    if (distance > playerState.attackRange) return;
+    const dir = toEnemy.normalize();
+    const alignment = BABYLON.Vector3.Dot(forwardDir, dir);
+    if (alignment < hitThreshold) return;
+
+    enemy.health -= playerState.attackDamage;
+    if (enemy.health <= 0) {
+      enemy.health = 0;
+      enemy.isAlive = false;
+    }
+  });
+}
+
+function resetGame(scene, player, cameraRig) {
+  player.position.copyFromFloats(0, 0.9, 0);
+  player.rotation.y = 0;
+  playerState.health = playerState.maxHealth;
+  playerState.isAlive = true;
+  playerState.attackCooldown = 0;
+  playerState.attackAnimTime = 0;
+  respawnEnemies();
+  cameraRig.smoothedPosition = player.position.clone().add(new BABYLON.Vector3(0, CAMERA_HEIGHT, -CAMERA_DISTANCE));
+  cameraRig.target = player.position.clone();
+  cameraRig.yaw = 0;
+  cameraRig.pitch = -0.12;
+  cameraRig.bobPhase = 0;
+  updateHUD();
+}
+
+function respawnEnemies() {
+  enemies.forEach((enemy) => {
+    if (!enemy.mesh || enemy.mesh.isDisposed()) return;
+    enemy.health = enemy.maxHealth;
+    enemy.isAlive = true;
+    enemy.attackCooldown = 0;
+    enemy.mesh.isVisible = true;
+    enemy.mesh.position.copyFrom(enemy.spawnPosition);
+    enemy.mesh.rotation.y = Math.random() * Math.PI * 2;
+  });
+}
+
+function applyDamageToPlayer(amount) {
+  if (!playerState.isAlive) return;
+  playerState.health = Math.max(0, playerState.health - amount);
+  if (playerState.health <= 0) {
+    playerState.isAlive = false;
+  }
 }
 
 function setupCamera(scene, player) {
@@ -334,6 +509,8 @@ function setupInput(scene, player, cameraRig) {
     right: false,
     run: false,
     pointerLocked: false,
+    attackPressed: false,
+    restartPressed: false,
   };
 
   const keyMap = {
@@ -353,6 +530,14 @@ function setupInput(scene, player, cameraRig) {
     const key = keyMap[event.code];
     if (key) {
       state[key] = true;
+      event.preventDefault();
+    }
+    if (event.code === "Space" && !event.repeat) {
+      state.attackPressed = true;
+      event.preventDefault();
+    }
+    if (event.code === "KeyR" && !event.repeat) {
+      state.restartPressed = true;
       event.preventDefault();
     }
   });
@@ -426,8 +611,22 @@ function setupAmbientAudio() {
   });
 }
 
-function update(scene, player, cameraRig, inputState) {
-  const delta = scene.getEngine().getDeltaTime() / 1000;
+function update(scene, player, cameraRig, inputState, delta) {
+  playerState.attackCooldown = Math.max(0, playerState.attackCooldown - delta);
+  playerState.attackAnimTime = Math.max(0, playerState.attackAnimTime - delta);
+
+  if (inputState.restartPressed && !playerState.isAlive) {
+    resetGame(scene, player, cameraRig);
+  }
+
+  if (!playerState.isAlive) {
+    updateCameraRig(cameraRig, player, delta, false);
+    updateHUD();
+    inputState.attackPressed = false;
+    inputState.restartPressed = false;
+    return;
+  }
+
   const forward = (inputState.forward ? 1 : 0) + (inputState.backward ? -1 : 0);
   const turn = (inputState.right ? 1 : 0) + (inputState.left ? -1 : 0);
 
@@ -447,12 +646,25 @@ function update(scene, player, cameraRig, inputState) {
   player.moveWithCollisions(scene.gravity.scale(delta));
 
   const isMoving = forward !== 0;
+
+  if (inputState.attackPressed) {
+    handlePlayerAttack(player);
+  }
+
+  updateEnemies(scene, player, delta);
   updateCameraRig(cameraRig, player, delta, isMoving);
+  updateHUD();
+
+  inputState.attackPressed = false;
+  inputState.restartPressed = false;
 }
 
 function updateCameraRig(cameraRig, player, delta, isMoving) {
   const { camera } = cameraRig;
   const lerp = 1 - Math.pow(1 - CAMERA_LERP, delta * 60);
+  const attackIntensity = playerState.attackAnimTime > 0
+    ? Math.sin((playerState.attackAnimTime / PLAYER_ATTACK_ANIM) * Math.PI)
+    : 0;
 
   if (isMoving) {
     cameraRig.bobPhase += delta * BOB_SPEED;
@@ -462,16 +674,18 @@ function updateCameraRig(cameraRig, player, delta, isMoving) {
   const bobOffset = isMoving ? Math.sin(cameraRig.bobPhase) * BOB_AMOUNT : 0;
 
   const yaw = player.rotation.y + cameraRig.yaw;
-  const pitch = cameraRig.pitch;
+  const pitch = cameraRig.pitch - attackIntensity * 0.08;
   const offsetDir = new BABYLON.Vector3(
     Math.sin(yaw) * Math.cos(pitch),
     Math.sin(pitch),
     Math.cos(yaw) * Math.cos(pitch)
   );
 
+  const attackPush = attackIntensity * 0.6;
+  const cameraDistance = Math.max(2.5, CAMERA_DISTANCE - attackPush);
   const desiredPos = player.position
     .add(new BABYLON.Vector3(0, CAMERA_HEIGHT + bobOffset, 0))
-    .subtract(offsetDir.scale(CAMERA_DISTANCE));
+    .subtract(offsetDir.scale(cameraDistance));
 
   if (!cameraRig.smoothedPosition) {
     cameraRig.smoothedPosition = desiredPos.clone();
@@ -491,4 +705,61 @@ function updateCameraRig(cameraRig, player, delta, isMoving) {
   const target = player.position.add(new BABYLON.Vector3(0, CAMERA_TARGET_HEIGHT + bobOffset * 0.5, 0));
   cameraRig.target = BABYLON.Vector3.Lerp(cameraRig.target, target, lerp);
   camera.setTarget(cameraRig.target);
+}
+
+function createHUD() {
+  const container = document.createElement("div");
+  Object.assign(container.style, {
+    position: "fixed",
+    top: "12px",
+    right: "12px",
+    padding: "8px 10px",
+    background: "rgba(20, 20, 20, 0.5)",
+    border: "1px solid rgba(255, 255, 255, 0.2)",
+    borderRadius: "4px",
+    fontSize: "12px",
+    lineHeight: "1.5",
+    color: "#e5e5e5",
+    fontFamily: '"Courier New", monospace',
+    pointerEvents: "none",
+  });
+
+  const hp = document.createElement("div");
+  hp.textContent = `HP: ${playerState.health} / ${playerState.maxHealth}`;
+
+  const controls = document.createElement("div");
+  controls.innerHTML = "Space: melee attack<br>R: restart when dead";
+
+  container.appendChild(hp);
+  container.appendChild(controls);
+  document.body.appendChild(container);
+
+  const deathMessage = document.createElement("div");
+  deathMessage.textContent = "You died. Press R to restart.";
+  Object.assign(deathMessage.style, {
+    position: "fixed",
+    top: "50%",
+    left: "50%",
+    transform: "translate(-50%, -50%)",
+    fontSize: "24px",
+    fontFamily: '"Courier New", monospace',
+    color: "#ff9b9b",
+    padding: "12px 16px",
+    background: "rgba(0, 0, 0, 0.6)",
+    border: "1px solid rgba(255, 255, 255, 0.3)",
+    borderRadius: "4px",
+    pointerEvents: "none",
+    display: "none",
+  });
+  document.body.appendChild(deathMessage);
+
+  return { container, hp, controls, deathMessage };
+}
+
+function updateHUD() {
+  if (!hudElements) return;
+  const hpValue = Math.max(0, Math.round(playerState.health));
+  hudElements.hp.textContent = `HP: ${hpValue} / ${playerState.maxHealth}`;
+  hudElements.hp.style.color = playerState.health <= playerState.maxHealth * 0.3 ? "#ff6b6b" : "#e5e5e5";
+  hudElements.deathMessage.style.display = playerState.isAlive ? "none" : "block";
 }
