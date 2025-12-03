@@ -55,6 +55,9 @@ const HEAL_PICKUPS = [
   { position: new BABYLON.Vector3(8, PICKUP_HEIGHT, -2.5), amount: HEAL_AMOUNT },
 ];
 const HIT_OVERLAY_DURATION = 0.4;
+const HORDE_START_COUNT = 3;
+const HORDE_INCREMENT = 2;
+const HORDE_BREAK_TIME = 5;
 
 const canvas = document.getElementById("renderCanvas");
 const engine = new BABYLON.Engine(canvas, false, {
@@ -81,6 +84,14 @@ let hitEffectManager = null;
 const hitEffects = [];
 const pickups = [];
 let hitOverlayTime = 0;
+const hordeState = {
+  round: 1,
+  killsThisRound: 0,
+  totalKills: 0,
+  breakTimer: 0,
+  inBreak: false,
+};
+const deathStats = { round: 1, kills: 0 };
 
 engine.resize();
 resizeForPixelLook(engine);
@@ -125,7 +136,7 @@ function createScene(targetEngine) {
 
   createEnvironment(scene);
   const player = createPlayer(scene);
-  createEnemies(scene);
+  createEnemies(scene, HORDE_START_COUNT);
   hitEffectManager = createHitEffectManager(scene);
   createPickups(scene);
   const cameraRig = setupCamera(scene, player);
@@ -349,10 +360,10 @@ function createLamp(scene, position) {
   head.material = headMat;
 }
 
-function createEnemies(scene) {
+function createEnemies(scene, count = ENEMY_COUNT) {
   enemies.length = 0;
-  const spacing = ROAD_LENGTH / (ENEMY_COUNT + 1);
-  for (let i = 0; i < ENEMY_COUNT; i++) {
+  const spacing = ROAD_LENGTH / (count + 1);
+  for (let i = 0; i < count; i++) {
     const x = -ROAD_LENGTH * 0.5 + spacing * (i + 1) + (Math.random() - 0.5) * 2;
     const z = (Math.random() * 2 - 1) * (ROAD_WIDTH * 0.3);
     const mesh = BABYLON.MeshBuilder.CreateCapsule(
@@ -496,6 +507,7 @@ function updateEnemies(scene, player, delta) {
   const targetClamp = ROAD_WIDTH * 0.45;
   const playerPos = player.position;
 
+  let aliveCount = 0;
   enemies.forEach((enemy) => {
     if (!enemy.mesh || enemy.mesh.isDisposed()) return;
     enemy.attackCooldown = Math.max(0, enemy.attackCooldown - delta);
@@ -508,6 +520,7 @@ function updateEnemies(scene, player, delta) {
       return;
     }
 
+    aliveCount++;
     enemy.mesh.isVisible = true;
     const toPlayer = playerPos.subtract(enemy.mesh.position);
     const distance = toPlayer.length();
@@ -538,6 +551,11 @@ function updateEnemies(scene, player, delta) {
       enemy.attackCooldown = ENEMY_ATTACK_COOLDOWN;
     }
   });
+
+  // If the round is active and all are dead, start break.
+  if (aliveCount === 0 && !hordeState.inBreak) {
+    startBreak();
+  }
 }
 
 function createPlayer(scene) {
@@ -594,6 +612,8 @@ function handlePlayerAttack(player) {
       if (bestEnemy.health <= 0) {
         bestEnemy.health = 0;
         bestEnemy.isAlive = false;
+        hordeState.killsThisRound++;
+        hordeState.totalKills++;
       }
     }
     return;
@@ -613,6 +633,8 @@ function handlePlayerAttack(player) {
     if (enemy.health <= 0) {
       enemy.health = 0;
       enemy.isAlive = false;
+      hordeState.killsThisRound++;
+      hordeState.totalKills++;
     }
   });
 }
@@ -627,7 +649,12 @@ function resetGame(scene, player, cameraRig) {
   playerState.inventory = [];
   playerState.currentWeaponIndex = -1;
   resetPickups();
-  respawnEnemies();
+  hordeState.round = 1;
+  hordeState.killsThisRound = 0;
+  hordeState.totalKills = 0;
+  hordeState.breakTimer = 0;
+  hordeState.inBreak = false;
+  recreateEnemiesForRound(scene, HORDE_START_COUNT);
   hitOverlayTime = 0;
   if (hudElements?.hitOverlay) {
     hudElements.hitOverlay.style.opacity = "0";
@@ -856,10 +883,30 @@ function update(scene, player, cameraRig, inputState, delta) {
   }
 
   if (!playerState.isAlive) {
+    deathStats.round = hordeState.round;
+    deathStats.kills = hordeState.totalKills;
     updateCameraRig(cameraRig, player, delta, false);
     updateHitEffects(delta);
     updateHUD();
     inputState.attackPressed = false;
+    inputState.restartPressed = false;
+    return;
+  }
+
+   // Handle break countdown between hordes.
+  if (hordeState.inBreak) {
+    hordeState.breakTimer -= delta;
+    if (hordeState.breakTimer <= 0) {
+      hordeState.inBreak = false;
+      hordeState.round += 1;
+      const enemyCount = HORDE_START_COUNT + (hordeState.round - 1) * HORDE_INCREMENT;
+      recreateEnemiesForRound(scene, enemyCount);
+    }
+    updateCameraRig(cameraRig, player, delta, false);
+    updateHitEffects(delta);
+    updateHUD();
+    inputState.attackPressed = false;
+    inputState.usePressed = false;
     inputState.restartPressed = false;
     return;
   }
@@ -1004,6 +1051,9 @@ function createHUD() {
 
   container.appendChild(hp);
   container.appendChild(hpBarWrapper);
+  const hordeInfo = document.createElement("div");
+  hordeInfo.textContent = "Horde: 1 | Kills: 0";
+  container.appendChild(hordeInfo);
   container.appendChild(controls);
   document.body.appendChild(container);
 
@@ -1043,7 +1093,27 @@ function createHUD() {
 
   document.body.appendChild(inventory);
 
-  return { container, hp, hpBarFill, inventory, controls, deathMessage, hitOverlay };
+  const leaderboard = document.createElement("div");
+  Object.assign(leaderboard.style, {
+    position: "fixed",
+    top: "50%",
+    left: "50%",
+    transform: "translate(-50%, -50%)",
+    padding: "14px 18px",
+    background: "rgba(0,0,0,0.7)",
+    border: "1px solid rgba(255,255,255,0.3)",
+    borderRadius: "6px",
+    fontFamily: '"Courier New", monospace',
+    fontSize: "16px",
+    color: "#e5e5e5",
+    display: "none",
+    textAlign: "center",
+    pointerEvents: "none",
+  });
+  leaderboard.innerHTML = "<div>Horde Summary</div><div>Round: 0</div><div>Kills: 0</div>";
+  document.body.appendChild(leaderboard);
+
+  return { container, hp, hpBarFill, inventory, controls, deathMessage, hitOverlay, hordeInfo, leaderboard };
 }
 
 function updateHUD() {
@@ -1055,6 +1125,14 @@ function updateHUD() {
   const hpPct = Math.max(0, Math.min(1, playerState.health / playerState.maxHealth));
   if (hudElements.hpBarFill) {
     hudElements.hpBarFill.style.width = `${hpPct * 100}%`;
+  }
+  if (hudElements.hordeInfo) {
+    hudElements.hordeInfo.textContent = `Horde: ${hordeState.round} | Kills: ${hordeState.totalKills}` +
+      (hordeState.inBreak ? ` | Next in: ${hordeState.breakTimer.toFixed(1)}s` : "");
+  }
+  if (hudElements.leaderboard) {
+    hudElements.leaderboard.style.display = playerState.isAlive ? "none" : "block";
+    hudElements.leaderboard.innerHTML = `<div>Horde Summary</div><div>Round: ${deathStats.round}</div><div>Kills: ${deathStats.kills}</div>`;
   }
   renderInventoryUI();
 }
@@ -1145,4 +1223,25 @@ function useCurrentItem() {
     }
     updateHUD();
   }
+}
+
+function recreateEnemiesForRound(scene, count) {
+  enemies.forEach((e) => e.mesh?.dispose?.());
+  createEnemies(scene, count);
+  hordeState.killsThisRound = 0;
+}
+
+function startBreak() {
+  hordeState.inBreak = true;
+  hordeState.breakTimer = HORDE_BREAK_TIME;
+  // Spawn a heal pickup each break.
+  const healMesh = BABYLON.MeshBuilder.CreateBox(`heal-break-${Date.now()}`, { size: 0.7 }, scene);
+  const mat = new BABYLON.StandardMaterial(`heal-break-mat-${Date.now()}`, scene);
+  mat.diffuseColor = new BABYLON.Color3(0.3, 0.8, 0.4);
+  mat.emissiveColor = new BABYLON.Color3(0.1, 0.4, 0.2);
+  mat.specularColor = BABYLON.Color3.Black();
+  healMesh.material = mat;
+  healMesh.position = new BABYLON.Vector3((Math.random() - 0.5) * (ROAD_LENGTH * 0.5), PICKUP_HEIGHT, (Math.random() - 0.5) * (ROAD_WIDTH * 0.5));
+  healMesh.checkCollisions = false;
+  pickups.push({ mesh: healMesh, kind: "heal", id: "heal", amount: HEAL_AMOUNT, collected: false });
 }
