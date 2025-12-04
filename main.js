@@ -72,6 +72,13 @@ const HORDE_BREAK_TIME = 5;
 const BULLET_SPEED = 28;
 const BULLET_LIFETIME = 1.2;
 const BULLET_SIZE = 0.12;
+const BAT_SWING_AMPLITUDE = 0.8;
+const BAT_OFFSET = new BABYLON.Vector3(0.35, 0.9, 0.1);
+const PISTOL_MAX_AMMO = 30;
+const PISTOL_START_AMMO = 12;
+const AMMO_PICKUP_AMOUNT = 8;
+const AMMO_SPAWN_BASE = 18;
+const AMMO_SPAWN_MIN = 6;
 
 const canvas = document.getElementById("renderCanvas");
 const engine = new BABYLON.Engine(canvas, false, {
@@ -92,6 +99,8 @@ const playerState = {
   attackAnimTime: 0,
   inventory: [],
   currentWeaponIndex: -1,
+  ammoPistol: 0,
+  maxAmmoPistol: PISTOL_MAX_AMMO,
 };
 let hudElements = null;
 let hitEffectManager = null;
@@ -109,6 +118,8 @@ const hordeState = {
 };
 const deathStats = { round: 1, kills: 0 };
 const bullets = [];
+let playerBat = null;
+let ammoSpawnTimer = AMMO_SPAWN_BASE;
 
 engine.resize();
 resizeForPixelLook(engine);
@@ -157,6 +168,7 @@ function createScene(targetEngine) {
   hitEffectManager = createHitEffectManager(scene);
   createPickups(scene);
   createFacingIndicator(scene, player);
+  createBatAttachment(scene, player);
   const cameraRig = setupCamera(scene, player);
   const inputState = setupInput(scene, player, cameraRig);
   hudElements = createHUD();
@@ -542,6 +554,8 @@ function updatePickups(player) {
         }
       } else if (pickup.kind === "heal") {
         playerState.inventory.push({ kind: "heal", id: "heal", amount: pickup.amount });
+      } else if (pickup.kind === "ammo") {
+        playerState.ammoPistol = Math.min(playerState.maxAmmoPistol, playerState.ammoPistol + (pickup.amount || AMMO_PICKUP_AMOUNT));
       }
       if (playerState.currentWeaponIndex === -1) {
         playerState.currentWeaponIndex = 0;
@@ -661,6 +675,26 @@ function createFacingIndicator(scene, player) {
   tip.isPickable = false;
 }
 
+function createBatAttachment(scene, player) {
+  const bat = BABYLON.MeshBuilder.CreateCapsule(
+    "playerBat",
+    { height: 0.8, radius: 0.08, tessellation: 6 },
+    scene
+  );
+  bat.parent = player;
+  bat.position = BAT_OFFSET.clone();
+  bat.rotation = new BABYLON.Vector3(0, Math.PI * 0.1, -0.2);
+  bat.setPivotPoint(new BABYLON.Vector3(0, -0.4, -0.05));
+  const mat = new BABYLON.StandardMaterial("playerBatMat", scene);
+  mat.diffuseColor = new BABYLON.Color3(0.55, 0.42, 0.32);
+  mat.emissiveColor = new BABYLON.Color3(0.08, 0.05, 0.04);
+  mat.specularColor = BABYLON.Color3.Black();
+  bat.material = mat;
+  bat.isPickable = false;
+  bat.setEnabled(false);
+  playerBat = bat;
+}
+
 function handlePlayerAttack(player) {
   if (!playerState.isAlive || playerState.attackCooldown > 0) return;
   const weaponId = getCurrentWeaponId();
@@ -675,6 +709,8 @@ function handlePlayerAttack(player) {
   const weaponDamage = weapon.damage;
 
   if (weaponId === "pistol") {
+    if (playerState.ammoPistol <= 0) return;
+    playerState.ammoPistol = Math.max(0, playerState.ammoPistol - 1);
     // Narrow cone, pick nearest in arc to simulate hitscan.
     let bestEnemy = null;
     let bestDist = Number.MAX_VALUE;
@@ -737,6 +773,7 @@ function resetGame(scene, player, cameraRig) {
   playerState.attackAnimTime = 0;
   playerState.inventory = [];
   playerState.currentWeaponIndex = -1;
+  playerState.ammoPistol = 0;
   resetPickups();
   hordeState.round = 1;
   hordeState.killsThisRound = 0;
@@ -1034,9 +1071,17 @@ function update(scene, player, cameraRig, inputState, delta) {
       hordeState.spawnTimer = ENEMY_SPAWN_INTERVAL;
     }
   }
+  // Ammo box spawns scale with horde.
+  ammoSpawnTimer -= delta;
+  if (ammoSpawnTimer <= 0) {
+    spawnAmmoPickup(scene);
+    const next = Math.max(AMMO_SPAWN_MIN, AMMO_SPAWN_BASE - hordeState.round * 1.2);
+    ammoSpawnTimer = next;
+  }
   updateHitEffects(delta);
   updateBullets(delta);
   updateCameraRig(cameraRig, player, delta, isMoving);
+  updateBatVisual(player, delta);
   updateHUD();
 
   inputState.attackPressed = false;
@@ -1191,9 +1236,9 @@ function createHUD() {
   const leaderboard = document.createElement("div");
   Object.assign(leaderboard.style, {
     position: "fixed",
-    top: "50%",
+    top: "8px",
     left: "50%",
-    transform: "translate(-50%, -50%)",
+    transform: "translateX(-50%)",
     padding: "14px 18px",
     background: "rgba(0,0,0,0.7)",
     border: "1px solid rgba(255,255,255,0.3)",
@@ -1208,7 +1253,22 @@ function createHUD() {
   leaderboard.innerHTML = "<div>Horde Summary</div><div>Round: 0</div><div>Kills: 0</div>";
   document.body.appendChild(leaderboard);
 
-  return { container, hp, hpBarFill, inventory, controls, deathMessage, hitOverlay, hordeInfo, leaderboard };
+  const ammoIndicator = document.createElement("div");
+  Object.assign(ammoIndicator.style, {
+    position: "fixed",
+    top: "45%",
+    left: "58%",
+    transform: "translate(-50%, -50%)",
+    color: "#e5e5e5",
+    fontFamily: '"Courier New", monospace',
+    fontSize: "14px",
+    pointerEvents: "none",
+    textShadow: "0 0 6px rgba(0,0,0,0.6)",
+    display: "none",
+  });
+  document.body.appendChild(ammoIndicator);
+
+  return { container, hp, hpBarFill, inventory, controls, deathMessage, hitOverlay, hordeInfo, leaderboard, ammoIndicator };
 }
 
 function updateHUD() {
@@ -1228,6 +1288,11 @@ function updateHUD() {
   if (hudElements.leaderboard) {
     hudElements.leaderboard.style.display = playerState.isAlive ? "none" : "block";
     hudElements.leaderboard.innerHTML = `<div>Horde Summary</div><div>Round: ${deathStats.round}</div><div>Kills: ${deathStats.kills}</div>`;
+  }
+  if (hudElements.ammoIndicator) {
+    const showAmmo = getCurrentWeaponId() === "pistol";
+    hudElements.ammoIndicator.style.display = showAmmo ? "block" : "none";
+    hudElements.ammoIndicator.textContent = showAmmo ? `Ammo: ${playerState.ammoPistol}/${playerState.maxAmmoPistol}` : "";
   }
   renderInventoryUI();
 }
@@ -1320,6 +1385,17 @@ function useCurrentItem() {
   }
 }
 
+function updateBatVisual(player, delta) {
+  if (!playerBat) return;
+  const isBat = getCurrentWeaponId() === "bat";
+  playerBat.setEnabled(isBat);
+  if (!isBat) return;
+  const t = playerState.attackAnimTime > 0 ? 1 - playerState.attackAnimTime / PLAYER_ATTACK_ANIM : 0;
+  const swing = Math.sin(t * Math.PI) * BAT_SWING_AMPLITUDE;
+  playerBat.rotation = new BABYLON.Vector3(0, Math.PI * 0.1, -0.2 - swing);
+  playerBat.position = BAT_OFFSET.clone();
+}
+
 function clampPlayerPosition(player) {
   player.position.x = BABYLON.Scalar.Clamp(player.position.x, -PLAYER_X_LIMIT, PLAYER_X_LIMIT);
   player.position.z = BABYLON.Scalar.Clamp(player.position.z, -PLAYER_Z_LIMIT, PLAYER_Z_LIMIT);
@@ -1331,6 +1407,7 @@ function recreateEnemiesForRound(scene, count) {
   hordeState.spawnQueue = count;
   hordeState.spawnTimer = 0;
   hordeState.killsThisRound = 0;
+  ammoSpawnTimer = Math.max(AMMO_SPAWN_MIN, AMMO_SPAWN_BASE - hordeState.round * 1.5);
 }
 
 function startBreak(scene) {
@@ -1348,4 +1425,16 @@ function startBreak(scene) {
   healMesh.position = new BABYLON.Vector3((Math.random() - 0.5) * (ROAD_LENGTH * 0.5), PICKUP_HEIGHT, (Math.random() - 0.5) * (ROAD_WIDTH * 0.5));
   healMesh.checkCollisions = false;
   pickups.push({ mesh: healMesh, kind: "heal", id: "heal", amount: HEAL_AMOUNT, collected: false });
+}
+
+function spawnAmmoPickup(scene) {
+  const mesh = BABYLON.MeshBuilder.CreateBox(`ammo-${Date.now()}`, { size: 0.7 }, scene);
+  mesh.position = new BABYLON.Vector3((Math.random() - 0.5) * (ROAD_LENGTH * 0.4), PICKUP_HEIGHT, (Math.random() - 0.5) * (ROAD_WIDTH * 0.4));
+  const mat = new BABYLON.StandardMaterial(`ammo-mat-${Date.now()}`, scene);
+  mat.diffuseColor = new BABYLON.Color3(0.9, 0.5, 0.15);
+  mat.emissiveColor = new BABYLON.Color3(0.4, 0.2, 0.05);
+  mat.specularColor = BABYLON.Color3.Black();
+  mesh.material = mat;
+  mesh.checkCollisions = false;
+  pickups.push({ mesh, kind: "ammo", id: "ammo", amount: AMMO_PICKUP_AMOUNT, collected: false });
 }
