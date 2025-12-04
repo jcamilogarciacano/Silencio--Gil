@@ -72,7 +72,7 @@ const HORDE_BREAK_TIME = 5;
 const BULLET_SPEED = 28;
 const BULLET_LIFETIME = 1.2;
 const BULLET_SIZE = 0.12;
-const BAT_SWING_AMPLITUDE = 0.8;
+const BAT_SWING_AMPLITUDE = 0.9;
 const BAT_OFFSET = new BABYLON.Vector3(0.35, 0.9, 0.1);
 const PISTOL_MAX_AMMO = 30;
 const PISTOL_START_AMMO = 12;
@@ -529,13 +529,14 @@ function createPickups(scene) {
   });
 }
 
-function resetPickups() {
+function resetPickups(scene) {
   pickups.forEach((pickup) => {
-    pickup.collected = false;
     if (pickup.mesh && !pickup.mesh.isDisposed()) {
-      pickup.mesh.isVisible = true;
+      pickup.mesh.dispose();
     }
   });
+  pickups.length = 0;
+  createPickups(scene);
 }
 
 function updatePickups(player) {
@@ -683,7 +684,7 @@ function createBatAttachment(scene, player) {
   );
   bat.parent = player;
   bat.position = BAT_OFFSET.clone();
-  bat.rotation = new BABYLON.Vector3(0, Math.PI * 0.1, -0.2);
+  bat.rotation = new BABYLON.Vector3(-0.4, Math.PI * 0.1, -0.05);
   bat.setPivotPoint(new BABYLON.Vector3(0, -0.4, -0.05));
   const mat = new BABYLON.StandardMaterial("playerBatMat", scene);
   mat.diffuseColor = new BABYLON.Color3(0.55, 0.42, 0.32);
@@ -774,7 +775,7 @@ function resetGame(scene, player, cameraRig) {
   playerState.inventory = [];
   playerState.currentWeaponIndex = -1;
   playerState.ammoPistol = 0;
-  resetPickups();
+  resetPickups(scene);
   hordeState.round = 1;
   hordeState.killsThisRound = 0;
   hordeState.totalKills = 0;
@@ -1392,7 +1393,7 @@ function updateBatVisual(player, delta) {
   if (!isBat) return;
   const t = playerState.attackAnimTime > 0 ? 1 - playerState.attackAnimTime / PLAYER_ATTACK_ANIM : 0;
   const swing = Math.sin(t * Math.PI) * BAT_SWING_AMPLITUDE;
-  playerBat.rotation = new BABYLON.Vector3(0, Math.PI * 0.1, -0.2 - swing);
+  playerBat.rotation = new BABYLON.Vector3(-0.4 + swing, Math.PI * 0.1, -0.05);
   playerBat.position = BAT_OFFSET.clone();
 }
 
