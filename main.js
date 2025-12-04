@@ -17,6 +17,10 @@ const CAMERA_PITCH_LIMIT = 0.45;
 const CAMERA_JITTER = 0.01;
 const BOB_AMOUNT = 0.06;
 const BOB_SPEED = 7.5;
+const BAT_CAMERA_PUSH = 0.6;
+const BAT_CAMERA_PITCH = 0.08;
+const PISTOL_RECOIL_PITCH = 0.12;
+const PISTOL_RECOIL_BACK = 0.4;
 const ROAD_LENGTH = 50;
 const ROAD_WIDTH = 12;
 const SIDEWALK_WIDTH = 1.2;
@@ -101,6 +105,7 @@ const playerState = {
   currentWeaponIndex: -1,
   ammoPistol: 0,
   maxAmmoPistol: PISTOL_MAX_AMMO,
+  lastAttackType: null,
 };
 let hudElements = null;
 let hitEffectManager = null;
@@ -120,6 +125,7 @@ const deathStats = { round: 1, kills: 0 };
 const bullets = [];
 let playerBat = null;
 let ammoSpawnTimer = AMMO_SPAWN_BASE;
+let playerPistol = null;
 
 engine.resize();
 resizeForPixelLook(engine);
@@ -169,6 +175,7 @@ function createScene(targetEngine) {
   createPickups(scene);
   createFacingIndicator(scene, player);
   createBatAttachment(scene, player);
+  createPistolAttachment(scene, player);
   const cameraRig = setupCamera(scene, player);
   const inputState = setupInput(scene, player, cameraRig);
   hudElements = createHUD();
@@ -696,6 +703,41 @@ function createBatAttachment(scene, player) {
   playerBat = bat;
 }
 
+function createPistolAttachment(scene, player) {
+  const pistolRoot = new BABYLON.TransformNode("playerPistol", scene);
+  pistolRoot.parent = player;
+  pistolRoot.position = new BABYLON.Vector3(-0.28, 0.95, 0.05); // left-hand side relative to player facing
+  pistolRoot.rotation = BABYLON.Vector3.Zero(); // let barrel point forward
+
+  const barrel = BABYLON.MeshBuilder.CreateCapsule(
+    "pistolBarrel",
+    { height: 0.4, radius: 0.06, tessellation: 5 },
+    scene
+  );
+  barrel.parent = pistolRoot;
+  barrel.position = new BABYLON.Vector3(0, -0.03, 0.18);
+  barrel.rotation = new BABYLON.Vector3(Math.PI * 0.5, 0, 0); // aim along +Z
+  const handle = BABYLON.MeshBuilder.CreateCapsule(
+    "pistolHandle",
+    { height: 0.22, radius: 0.07, tessellation: 5 },
+    scene
+  );
+  handle.parent = pistolRoot;
+  handle.position = new BABYLON.Vector3(0, -0.12, 0);
+  handle.rotation = new BABYLON.Vector3(Math.PI * 0.35, 0, 0);
+
+  const mat = new BABYLON.StandardMaterial("pistolMat", scene);
+  mat.diffuseColor = new BABYLON.Color3(0.25, 0.25, 0.32);
+  mat.emissiveColor = new BABYLON.Color3(0.05, 0.05, 0.08);
+  mat.specularColor = BABYLON.Color3.Black();
+  barrel.material = mat;
+  handle.material = mat;
+  barrel.isPickable = false;
+  handle.isPickable = false;
+  pistolRoot.setEnabled(false);
+  playerPistol = pistolRoot;
+}
+
 function handlePlayerAttack(player) {
   if (!playerState.isAlive || playerState.attackCooldown > 0) return;
   const weaponId = getCurrentWeaponId();
@@ -703,6 +745,7 @@ function handlePlayerAttack(player) {
   const weapon = WEAPONS[weaponId] || WEAPONS.bat;
   playerState.attackCooldown = weapon.cooldown;
   playerState.attackAnimTime = PLAYER_ATTACK_ANIM;
+  playerState.lastAttackType = weaponId;
 
   const forwardDir = new BABYLON.Vector3(Math.sin(player.rotation.y), 0, Math.cos(player.rotation.y)).normalize();
   const hitThreshold = Math.cos(BABYLON.Tools.ToRadians(weapon.cone));
@@ -775,6 +818,7 @@ function resetGame(scene, player, cameraRig) {
   playerState.inventory = [];
   playerState.currentWeaponIndex = -1;
   playerState.ammoPistol = 0;
+  playerState.lastAttackType = null;
   resetPickups(scene);
   hordeState.round = 1;
   hordeState.killsThisRound = 0;
@@ -1083,6 +1127,7 @@ function update(scene, player, cameraRig, inputState, delta) {
   updateBullets(delta);
   updateCameraRig(cameraRig, player, delta, isMoving);
   updateBatVisual(player, delta);
+  updatePistolVisual();
   updateHUD();
 
   inputState.attackPressed = false;
@@ -1096,6 +1141,9 @@ function updateCameraRig(cameraRig, player, delta, isMoving) {
   const attackIntensity = playerState.attackAnimTime > 0
     ? Math.sin((playerState.attackAnimTime / PLAYER_ATTACK_ANIM) * Math.PI)
     : 0;
+  const isPistol = playerState.lastAttackType === "pistol";
+  const pitchOffset = isPistol ? attackIntensity * PISTOL_RECOIL_PITCH : -attackIntensity * BAT_CAMERA_PITCH;
+  const distanceOffset = isPistol ? attackIntensity * PISTOL_RECOIL_BACK : -attackIntensity * BAT_CAMERA_PUSH;
 
   if (isMoving) {
     cameraRig.bobPhase += delta * BOB_SPEED;
@@ -1105,15 +1153,14 @@ function updateCameraRig(cameraRig, player, delta, isMoving) {
   const bobOffset = isMoving ? Math.sin(cameraRig.bobPhase) * BOB_AMOUNT : 0;
 
   const yaw = player.rotation.y + cameraRig.yaw;
-  const pitch = cameraRig.pitch - attackIntensity * 0.08;
+  const pitch = cameraRig.pitch + pitchOffset;
   const offsetDir = new BABYLON.Vector3(
     Math.sin(yaw) * Math.cos(pitch),
     Math.sin(pitch),
     Math.cos(yaw) * Math.cos(pitch)
   );
 
-  const attackPush = attackIntensity * 0.6;
-  const cameraDistance = Math.max(2.5, CAMERA_DISTANCE - attackPush);
+  const cameraDistance = Math.max(2.5, CAMERA_DISTANCE + distanceOffset);
   const desiredPos = player.position
     .add(new BABYLON.Vector3(0, CAMERA_HEIGHT + bobOffset, 0))
     .subtract(offsetDir.scale(cameraDistance));
@@ -1395,6 +1442,12 @@ function updateBatVisual(player, delta) {
   const swing = Math.sin(t * Math.PI) * BAT_SWING_AMPLITUDE;
   playerBat.rotation = new BABYLON.Vector3(-0.4 + swing, Math.PI * 0.1, -0.05);
   playerBat.position = BAT_OFFSET.clone();
+}
+
+function updatePistolVisual() {
+  if (!playerPistol) return;
+  const isPistol = getCurrentWeaponId() === "pistol";
+  playerPistol.setEnabled(isPistol);
 }
 
 function clampPlayerPosition(player) {
