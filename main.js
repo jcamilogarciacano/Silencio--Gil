@@ -84,6 +84,9 @@ const AMMO_PICKUP_AMOUNT = 8;
 const AMMO_SPAWN_BASE = 18;
 const AMMO_SPAWN_MIN = 6;
 const PLAYER_MODEL_TARGET_HEIGHT = 1.8;
+const PLAYER_ELLIPSOID = new BABYLON.Vector3(0.35, 0.8, 0.35);
+const PLAYER_ELLIPSOID_OFFSET = new BABYLON.Vector3(0, 0.2, 0);
+const GROUND_SNAP_MAX = 0.6;
 
 const canvas = document.getElementById("renderCanvas");
 const engine = new BABYLON.Engine(canvas, false, {
@@ -275,11 +278,19 @@ function createForestScene(targetEngine) {
       // Place base on y=0 and center in X/Z.
       root.position = new BABYLON.Vector3(-centerX, -minY, -centerZ);
 
-      const spawnY = 3.5; // stand above ground
+      // Ensure collision data is up to date after transforms.
+      root.getChildMeshes().forEach((m) => {
+        m.checkCollisions = true;
+        m.isPickable = false;
+        m.computeWorldMatrix(true);
+        m.refreshBoundingInfo(true);
+      });
+
+      const spawnY = 2.8; // stand above ground
       data.spawnPosition = new BABYLON.Vector3(0, spawnY, 0);
       // Push fallback ground far below and disable its collisions so terrain handles it.
-      fallbackGround.position.y = -50;
-      fallbackGround.checkCollisions = false;
+      fallbackGround.position.y = minY - 0.5;
+      fallbackGround.checkCollisions = true;
       console.info("[forest] bounds size:", scaled.max.subtract(scaled.min).toString());
       console.info("[forest] spawn at:", data.spawnPosition.toString());
       console.info("[forest] scaleFactor:", scaleFactor.toFixed(4));
@@ -824,8 +835,8 @@ function createPlayer(scene) {
   mat.specularColor = BABYLON.Color3.Black();
   mat.alpha = 0.02; // keep collisions but hide the capsule
   player.material = mat;
-  player.ellipsoid = new BABYLON.Vector3(0.4, 0.9, 0.4);
-  player.ellipsoidOffset = new BABYLON.Vector3(0, 0, 0);
+  player.ellipsoid = PLAYER_ELLIPSOID.clone();
+  player.ellipsoidOffset = PLAYER_ELLIPSOID_OFFSET.clone();
   player.checkCollisions = true;
   return player;
 }
@@ -1301,6 +1312,7 @@ function update(scene, player, cameraRig, inputState, delta) {
 
   // Gravity keeps the capsule grounded and prevents clipping through raised props.
   player.moveWithCollisions(scene.gravity.scale(delta));
+  snapPlayerToGround(scene, player);
   clampPlayerPosition(player);
 
   const isMoving = forward !== 0;
@@ -1359,6 +1371,7 @@ function updateForestScene(scene, player, cameraRig, inputState, delta) {
   }
 
   player.moveWithCollisions(scene.gravity.scale(delta));
+  snapPlayerToGround(scene, player);
 
   const isMoving = forward !== 0;
   updateCameraRig(cameraRig, player, delta, isMoving);
@@ -1663,6 +1676,20 @@ function useCurrentItem() {
       playerState.currentWeaponIndex = playerState.inventory.length - 1;
     }
     updateHUD();
+  }
+}
+
+function snapPlayerToGround(scene, player) {
+  const rayOrigin = player.position.add(new BABYLON.Vector3(0, PLAYER_ELLIPSOID.y + 0.5, 0));
+  const ray = new BABYLON.Ray(rayOrigin, new BABYLON.Vector3(0, -1, 0), GROUND_SNAP_MAX + PLAYER_ELLIPSOID.y + 0.5);
+  const pick = scene.pickWithRay(ray, (mesh) => mesh !== player && mesh.checkCollisions && mesh.isEnabled());
+  if (pick?.hit && pick.pickedPoint) {
+    const targetY = pick.pickedPoint.y + PLAYER_ELLIPSOID.y;
+    if (player.position.y < targetY - 0.01 || player.position.y > targetY + GROUND_SNAP_MAX) {
+      player.position.y = targetY;
+    } else {
+      player.position.y = BABYLON.Scalar.Lerp(player.position.y, targetY, 0.5);
+    }
   }
 }
 
