@@ -126,13 +126,20 @@ const bullets = [];
 let playerBat = null;
 let ammoSpawnTimer = AMMO_SPAWN_BASE;
 let playerPistol = null;
+let streetSceneData = null;
+let forestSceneData = null;
+let activeSceneData = null;
 
 engine.resize();
 resizeForPixelLook(engine);
-const scene = createScene(engine);
+streetSceneData = createStreetScene(engine);
+activeSceneData = streetSceneData;
+setupSceneSwitcher();
 
 engine.runRenderLoop(() => {
-  scene.render();
+  if (activeSceneData?.scene) {
+    activeSceneData.scene.render();
+  }
 });
 
 window.addEventListener("resize", () => {
@@ -149,7 +156,7 @@ function resizeForPixelLook(targetEngine) {
   targetEngine.setHardwareScalingLevel(scale);
 }
 
-function createScene(targetEngine) {
+function createStreetScene(targetEngine) {
   const scene = new BABYLON.Scene(targetEngine);
   scene.clearColor = CLEAR_COLOR;
   scene.fogMode = BABYLON.Scene.FOGMODE_EXP;
@@ -177,7 +184,8 @@ function createScene(targetEngine) {
   createBatAttachment(scene, player);
   createPistolAttachment(scene, player);
   const cameraRig = setupCamera(scene, player);
-  const inputState = setupInput(scene, player, cameraRig);
+  const isActive = () => activeSceneData?.scene === scene;
+  const inputState = setupInput(scene, player, cameraRig, isActive);
   hudElements = createHUD();
   updateHUD();
   setupAmbientAudio();
@@ -187,7 +195,180 @@ function createScene(targetEngine) {
     update(scene, player, cameraRig, inputState, delta);
   });
 
-  return scene;
+  return { scene, player, cameraRig, inputState, name: "street" };
+}
+
+function createForestScene(targetEngine) {
+  const scene = new BABYLON.Scene(targetEngine);
+  scene.clearColor = new BABYLON.Color4(0.2, 0.22, 0.2, 1);
+  scene.gravity = new BABYLON.Vector3(0, -GRAVITY, 0);
+  scene.collisionsEnabled = true;
+  // Safety ground in case the glb lacks a floor collider.
+  const fallbackGround = BABYLON.MeshBuilder.CreateGround("forestFallbackGround", { width: 200, height: 200 }, scene);
+  fallbackGround.position.y = -0.2;
+  fallbackGround.isVisible = false;
+  fallbackGround.checkCollisions = true;
+
+  const hemi = new BABYLON.HemisphericLight("forestHemi", new BABYLON.Vector3(0, 1, 0), scene);
+  hemi.intensity = 0.9;
+  hemi.groundColor = new BABYLON.Color3(0.25, 0.25, 0.25);
+
+  const dir = new BABYLON.DirectionalLight("forestDir", new BABYLON.Vector3(-0.6, -1, -0.3), scene);
+  dir.position = new BABYLON.Vector3(20, 30, 20);
+  dir.intensity = 0.7;
+
+  const player = createPlayer(scene);
+  const cameraRig = setupCamera(scene, player);
+  scene.activeCamera = cameraRig.camera;
+  const isActive = () => activeSceneData?.scene === scene;
+  const inputState = setupInput(scene, player, cameraRig, isActive);
+
+  const data = {
+    scene,
+    player,
+    cameraRig,
+    inputState,
+    spawnPosition: new BABYLON.Vector3(0, 1, 0),
+    name: "forest",
+  };
+
+  BABYLON.SceneLoader.ImportMesh(
+    "",
+    "assets/",
+    "forest.glb",
+    scene,
+    (meshes) => {
+      console.info("[forest] loaded meshes:", meshes.length);
+      if (!meshes.length) return;
+      meshes.forEach((mesh) => {
+        mesh.checkCollisions = true;
+        mesh.getChildMeshes()?.forEach((child) => {
+          child.checkCollisions = true;
+        });
+      });
+      const bounds = meshes.reduce(
+        (acc, mesh) => {
+          const info = mesh.getHierarchyBoundingVectors?.();
+          if (!info) return acc;
+          acc.min = BABYLON.Vector3.Minimize(acc.min, info.min);
+          acc.max = BABYLON.Vector3.Maximize(acc.max, info.max);
+          return acc;
+        },
+        {
+          min: new BABYLON.Vector3(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY),
+          max: new BABYLON.Vector3(Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY),
+        }
+      );
+      if (!isFinite(bounds.min.x)) return;
+      const rawSize = bounds.max.subtract(bounds.min);
+      const targetRadius = 40; // desired half-size so the forest sits in a sensible scale.
+      const currentRadius = rawSize.length() * 0.5;
+      const scaleFactor = currentRadius > 0.001 ? targetRadius / currentRadius : 1;
+      if (scaleFactor !== 1) {
+        meshes.forEach((mesh) => mesh.scaling.scaleInPlace(scaleFactor));
+      }
+
+      // Recompute bounds after scaling.
+      const scaledBounds = meshes.reduce(
+        (acc, mesh) => {
+          const info = mesh.getHierarchyBoundingVectors?.();
+          if (!info) return acc;
+          acc.min = BABYLON.Vector3.Minimize(acc.min, info.min);
+          acc.max = BABYLON.Vector3.Maximize(acc.max, info.max);
+          return acc;
+        },
+        {
+          min: new BABYLON.Vector3(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY),
+          max: new BABYLON.Vector3(Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY),
+        }
+      );
+      if (!isFinite(scaledBounds.min.x)) return;
+      const center = scaledBounds.min.add(scaledBounds.max).scale(0.5);
+      // Recenters the imported meshes around origin so the player/camera land in the middle.
+      meshes.forEach((mesh) => {
+        mesh.position = mesh.position.subtract(center);
+      });
+      const minY = scaledBounds.min.y - center.y;
+      const maxY = scaledBounds.max.y - center.y;
+      const spawnY = minY + 1.2;
+      data.spawnPosition = new BABYLON.Vector3(0, spawnY, 0);
+      // Stretch the fallback ground to cover the model footprint.
+      const sizeX = Math.max(80, (scaledBounds.max.x - scaledBounds.min.x) * 1.5);
+      const sizeZ = Math.max(80, (scaledBounds.max.z - scaledBounds.min.z) * 1.5);
+      fallbackGround.scaling = new BABYLON.Vector3(sizeX / 200, 1, sizeZ / 200);
+      fallbackGround.position.y = minY - 0.2;
+      fallbackGround.position.x = 0;
+      fallbackGround.position.z = 0;
+      console.info("[forest] bounds size:", scaledBounds.max.subtract(scaledBounds.min).toString());
+      console.info("[forest] spawn at:", data.spawnPosition.toString());
+      data.player.position.copyFrom(data.spawnPosition);
+      data.cameraRig.smoothedPosition = null;
+    }
+  , null,
+    (scene2, message, exception) => {
+      console.error("[forest] load failed:", message, exception);
+    }
+  );
+
+  scene.registerBeforeRender(() => {
+    if (!isActive()) return;
+    const delta = scene.getEngine().getDeltaTime() / 1000;
+    updateForestScene(scene, player, cameraRig, inputState, delta);
+  });
+
+  return data;
+}
+
+function setupSceneSwitcher() {
+  window.addEventListener("keydown", (event) => {
+    if (event.code === "KeyF" && !event.repeat) {
+      if (activeSceneData?.name === "street") {
+        switchToForestScene();
+      } else {
+        switchToStreetScene();
+      }
+      event.preventDefault();
+    }
+  });
+}
+
+function switchToForestScene() {
+  if (!forestSceneData) {
+    forestSceneData = createForestScene(engine);
+  }
+  const spawn = forestSceneData.spawnPosition || new BABYLON.Vector3(0, 1, 0);
+  forestSceneData.player.position.copyFrom(spawn);
+  resetCameraRig(forestSceneData.cameraRig, forestSceneData.player);
+  // Reset combat camera offsets when hopping scenes.
+  playerState.attackAnimTime = 0;
+  playerState.attackCooldown = 0;
+  playerState.lastAttackType = null;
+  document.exitPointerLock?.();
+  setHUDVisibility(false);
+  activeSceneData = forestSceneData;
+}
+
+function switchToStreetScene() {
+  setHUDVisibility(true);
+  activeSceneData = streetSceneData;
+}
+
+function setHUDVisibility(show) {
+  if (!hudElements) return;
+  const displayValue = show ? "" : "none";
+  hudElements.container.style.display = displayValue;
+  hudElements.inventory.style.display = show ? "flex" : "none";
+  hudElements.deathMessage.style.display = show && !playerState.isAlive ? "block" : "none";
+  hudElements.hitOverlay.style.display = show ? "" : "none";
+}
+
+function resetCameraRig(cameraRig, player) {
+  if (!cameraRig || !player) return;
+  cameraRig.smoothedPosition = player.position.clone().add(new BABYLON.Vector3(0, CAMERA_HEIGHT, -CAMERA_DISTANCE));
+  cameraRig.target = player.position.clone();
+  cameraRig.yaw = 0;
+  cameraRig.pitch = -0.12;
+  cameraRig.bobPhase = 0;
 }
 
 function createEnvironment(scene) {
@@ -878,7 +1059,7 @@ function setupCamera(scene, player) {
   };
 }
 
-function setupInput(scene, player, cameraRig) {
+function setupInput(scene, player, cameraRig, isActive = () => true) {
   const state = {
     forward: false,
     backward: false,
@@ -906,6 +1087,7 @@ function setupInput(scene, player, cameraRig) {
   };
 
   window.addEventListener("keydown", (event) => {
+    if (!isActive()) return;
     const key = keyMap[event.code];
     if (key) {
       state[key] = true;
@@ -966,6 +1148,7 @@ function setupInput(scene, player, cameraRig) {
   });
 
   window.addEventListener("keyup", (event) => {
+    if (!isActive()) return;
     const key = keyMap[event.code];
     if (key) {
       state[key] = false;
@@ -976,17 +1159,18 @@ function setupInput(scene, player, cameraRig) {
   const canvasTarget = scene.getEngine().getRenderingCanvas();
   if (canvasTarget) {
     canvasTarget.addEventListener("click", () => {
+      if (!isActive()) return;
       canvasTarget.requestPointerLock?.();
     });
   }
 
   const lockChange = () => {
-    state.pointerLocked = document.pointerLockElement === canvasTarget;
+    state.pointerLocked = isActive() && document.pointerLockElement === canvasTarget;
   };
   document.addEventListener("pointerlockchange", lockChange);
 
   window.addEventListener("mousemove", (event) => {
-    if (!state.pointerLocked) return;
+    if (!state.pointerLocked || !isActive()) return;
     cameraRig.yaw += event.movementX * CAMERA_SENSITIVITY;
     cameraRig.pitch += event.movementY * CAMERA_SENSITIVITY;
     cameraRig.pitch = BABYLON.Scalar.Clamp(cameraRig.pitch, -CAMERA_PITCH_LIMIT, CAMERA_PITCH_LIMIT);
@@ -1135,6 +1319,32 @@ function update(scene, player, cameraRig, inputState, delta) {
   inputState.usePressed = false;
 }
 
+function updateForestScene(scene, player, cameraRig, inputState, delta) {
+  const forward = (inputState.forward ? 1 : 0) + (inputState.backward ? -1 : 0);
+  const turn = (inputState.right ? 1 : 0) + (inputState.left ? -1 : 0);
+
+  if (turn !== 0) {
+    player.rotation.y += turn * ROTATION_SPEED * delta;
+  }
+
+  const forwardDir = new BABYLON.Vector3(Math.sin(player.rotation.y), 0, Math.cos(player.rotation.y));
+  const speed = WALK_SPEED * (inputState.run ? RUN_MULTIPLIER : 1);
+  const move = forwardDir.scale(forward * speed * delta);
+
+  if (forward !== 0) {
+    player.moveWithCollisions(move);
+  }
+
+  player.moveWithCollisions(scene.gravity.scale(delta));
+
+  const isMoving = forward !== 0;
+  updateCameraRig(cameraRig, player, delta, isMoving);
+
+  inputState.attackPressed = false;
+  inputState.restartPressed = false;
+  inputState.usePressed = false;
+}
+
 function updateCameraRig(cameraRig, player, delta, isMoving) {
   const { camera } = cameraRig;
   const lerp = 1 - Math.pow(1 - CAMERA_LERP, delta * 60);
@@ -1235,7 +1445,7 @@ function createHUD() {
   });
 
   const controls = document.createElement("div");
-  controls.innerHTML = "Space: attack | E: use item | 1-0: select slot | R: restart";
+  controls.innerHTML = "Space: attack | E: use item | 1-0: select slot | F: forest scene | R: restart";
 
   container.appendChild(hp);
   container.appendChild(hpBarWrapper);
