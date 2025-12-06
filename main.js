@@ -83,6 +83,7 @@ const PISTOL_START_AMMO = 12;
 const AMMO_PICKUP_AMOUNT = 8;
 const AMMO_SPAWN_BASE = 18;
 const AMMO_SPAWN_MIN = 6;
+const PLAYER_MODEL_TARGET_HEIGHT = 1.8;
 
 const canvas = document.getElementById("renderCanvas");
 const engine = new BABYLON.Engine(canvas, false, {
@@ -183,6 +184,7 @@ function createStreetScene(targetEngine) {
   createFacingIndicator(scene, player);
   createBatAttachment(scene, player);
   createPistolAttachment(scene, player);
+  attachPlayerModel(scene, player);
   const cameraRig = setupCamera(scene, player);
   const isActive = () => activeSceneData?.scene === scene;
   const inputState = setupInput(scene, player, cameraRig, isActive);
@@ -222,6 +224,7 @@ function createForestScene(targetEngine) {
   scene.activeCamera = cameraRig.camera;
   const isActive = () => activeSceneData?.scene === scene;
   const inputState = setupInput(scene, player, cameraRig, isActive);
+  attachPlayerModel(scene, player);
 
   const data = {
     scene,
@@ -272,24 +275,11 @@ function createForestScene(targetEngine) {
       // Place base on y=0 and center in X/Z.
       root.position = new BABYLON.Vector3(-centerX, -minY, -centerZ);
 
-      const spawnY = 1.2; // stand slightly above ground
+      const spawnY = 3.5; // stand above ground
       data.spawnPosition = new BABYLON.Vector3(0, spawnY, 0);
-      // Stretch the fallback ground to cover the model footprint.
-      const groundX = Math.max(80, sizeX * 1.5);
-      const groundZ = Math.max(80, sizeZ * 1.5);
-      fallbackGround.scaling = new BABYLON.Vector3(groundX / 200, 1, groundZ / 200);
-      fallbackGround.position.y = -0.2;
-      fallbackGround.position.x = 0;
-      fallbackGround.position.z = 0;
-      // Add a simple walkable ground for collisions so the player can traverse without complex mesh colliders.
-      const walkGround = BABYLON.MeshBuilder.CreateGround(
-        "forestNavGround",
-        { width: groundX, height: groundZ },
-        scene
-      );
-      walkGround.position.y = 0;
-      walkGround.checkCollisions = true;
-      walkGround.isVisible = false;
+      // Push fallback ground far below and disable its collisions so terrain handles it.
+      fallbackGround.position.y = -50;
+      fallbackGround.checkCollisions = false;
       console.info("[forest] bounds size:", scaled.max.subtract(scaled.min).toString());
       console.info("[forest] spawn at:", data.spawnPosition.toString());
       console.info("[forest] scaleFactor:", scaleFactor.toFixed(4));
@@ -832,6 +822,7 @@ function createPlayer(scene) {
   mat.diffuseColor = new BABYLON.Color3(0.65, 0.65, 0.65);
   mat.emissiveColor = new BABYLON.Color3(0.05, 0.05, 0.05);
   mat.specularColor = BABYLON.Color3.Black();
+  mat.alpha = 0.02; // keep collisions but hide the capsule
   player.material = mat;
   player.ellipsoid = new BABYLON.Vector3(0.4, 0.9, 0.4);
   player.ellipsoidOffset = new BABYLON.Vector3(0, 0, 0);
@@ -909,6 +900,46 @@ function createPistolAttachment(scene, player) {
   handle.isPickable = false;
   pistolRoot.setEnabled(false);
   playerPistol = pistolRoot;
+}
+
+function attachPlayerModel(scene, player) {
+  BABYLON.SceneLoader.ImportMesh(
+    "",
+    "assets/",
+    "player.glb",
+    scene,
+    (meshes) => {
+      if (!meshes.length) return;
+      const root = new BABYLON.TransformNode("playerVisual", scene);
+      root.parent = player;
+      meshes.forEach((mesh) => {
+        mesh.parent = root;
+        mesh.checkCollisions = false;
+        mesh.isPickable = false;
+        mesh.getChildMeshes()?.forEach((child) => {
+          child.checkCollisions = false;
+          child.isPickable = false;
+        });
+      });
+      const bounds = root.getHierarchyBoundingVectors(true);
+      if (!bounds) return;
+      const size = bounds.max.subtract(bounds.min);
+      const height = size.y || 1;
+      const scale = PLAYER_MODEL_TARGET_HEIGHT / height;
+      root.scaling = new BABYLON.Vector3(scale, scale, scale);
+      const scaled = root.getHierarchyBoundingVectors(true);
+      if (scaled) {
+        const centerX = (scaled.min.x + scaled.max.x) * 0.5;
+        const centerZ = (scaled.min.z + scaled.max.z) * 0.5;
+        const minY = scaled.min.y;
+        root.position = new BABYLON.Vector3(-centerX, -minY, -centerZ);
+      }
+    },
+    null,
+    (scene2, message, exception) => {
+      console.error("[playerModel] load failed:", message, exception);
+    }
+  );
 }
 
 function handlePlayerAttack(player) {
