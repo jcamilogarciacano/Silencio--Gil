@@ -243,9 +243,9 @@ function createForestScene(targetEngine) {
       const root = new BABYLON.TransformNode("forestRoot", scene);
       meshes.forEach((mesh) => {
         mesh.parent = root;
-        mesh.checkCollisions = true;
+        mesh.checkCollisions = false; // keep visuals light; we provide a simple nav ground instead
         mesh.getChildMeshes()?.forEach((child) => {
-          child.checkCollisions = true;
+          child.checkCollisions = false;
         });
       });
 
@@ -281,6 +281,15 @@ function createForestScene(targetEngine) {
       fallbackGround.position.y = -0.2;
       fallbackGround.position.x = 0;
       fallbackGround.position.z = 0;
+      // Add a simple walkable ground for collisions so the player can traverse without complex mesh colliders.
+      const walkGround = BABYLON.MeshBuilder.CreateGround(
+        "forestNavGround",
+        { width: groundX, height: groundZ },
+        scene
+      );
+      walkGround.position.y = 0;
+      walkGround.checkCollisions = true;
+      walkGround.isVisible = false;
       console.info("[forest] bounds size:", scaled.max.subtract(scaled.min).toString());
       console.info("[forest] spawn at:", data.spawnPosition.toString());
       console.info("[forest] scaleFactor:", scaleFactor.toFixed(4));
