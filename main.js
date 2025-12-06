@@ -240,67 +240,50 @@ function createForestScene(targetEngine) {
     (meshes) => {
       console.info("[forest] loaded meshes:", meshes.length);
       if (!meshes.length) return;
+      const root = new BABYLON.TransformNode("forestRoot", scene);
       meshes.forEach((mesh) => {
+        mesh.parent = root;
         mesh.checkCollisions = true;
         mesh.getChildMeshes()?.forEach((child) => {
           child.checkCollisions = true;
         });
       });
-      const bounds = meshes.reduce(
-        (acc, mesh) => {
-          const info = mesh.getHierarchyBoundingVectors?.();
-          if (!info) return acc;
-          acc.min = BABYLON.Vector3.Minimize(acc.min, info.min);
-          acc.max = BABYLON.Vector3.Maximize(acc.max, info.max);
-          return acc;
-        },
-        {
-          min: new BABYLON.Vector3(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY),
-          max: new BABYLON.Vector3(Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY),
-        }
-      );
-      if (!isFinite(bounds.min.x)) return;
+
+      const getBounds = () => root.getHierarchyBoundingVectors(true);
+      const bounds = getBounds();
+      if (!bounds || !isFinite(bounds.min.x)) return;
       const rawSize = bounds.max.subtract(bounds.min);
       const targetRadius = 40; // desired half-size so the forest sits in a sensible scale.
       const currentRadius = rawSize.length() * 0.5;
       const scaleFactor = currentRadius > 0.001 ? targetRadius / currentRadius : 1;
       if (scaleFactor !== 1) {
-        meshes.forEach((mesh) => mesh.scaling.scaleInPlace(scaleFactor));
+        root.scaling.scaleInPlace(scaleFactor);
       }
 
-      // Recompute bounds after scaling.
-      const scaledBounds = meshes.reduce(
-        (acc, mesh) => {
-          const info = mesh.getHierarchyBoundingVectors?.();
-          if (!info) return acc;
-          acc.min = BABYLON.Vector3.Minimize(acc.min, info.min);
-          acc.max = BABYLON.Vector3.Maximize(acc.max, info.max);
-          return acc;
-        },
-        {
-          min: new BABYLON.Vector3(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY),
-          max: new BABYLON.Vector3(Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY),
-        }
-      );
-      if (!isFinite(scaledBounds.min.x)) return;
-      const center = scaledBounds.min.add(scaledBounds.max).scale(0.5);
-      // Recenters the imported meshes around origin so the player/camera land in the middle.
-      meshes.forEach((mesh) => {
-        mesh.position = mesh.position.subtract(center);
-      });
-      const minY = scaledBounds.min.y - center.y;
-      const maxY = scaledBounds.max.y - center.y;
-      const spawnY = minY + 1.2;
+      // Recompute after scaling.
+      const scaled = getBounds();
+      if (!scaled || !isFinite(scaled.min.x)) return;
+      const sizeX = scaled.max.x - scaled.min.x;
+      const sizeY = scaled.max.y - scaled.min.y;
+      const sizeZ = scaled.max.z - scaled.min.z;
+      const centerX = (scaled.min.x + scaled.max.x) * 0.5;
+      const centerZ = (scaled.min.z + scaled.max.z) * 0.5;
+      const minY = scaled.min.y;
+      // Place base on y=0 and center in X/Z.
+      root.position = new BABYLON.Vector3(-centerX, -minY, -centerZ);
+
+      const spawnY = 1.2; // stand slightly above ground
       data.spawnPosition = new BABYLON.Vector3(0, spawnY, 0);
       // Stretch the fallback ground to cover the model footprint.
-      const sizeX = Math.max(80, (scaledBounds.max.x - scaledBounds.min.x) * 1.5);
-      const sizeZ = Math.max(80, (scaledBounds.max.z - scaledBounds.min.z) * 1.5);
-      fallbackGround.scaling = new BABYLON.Vector3(sizeX / 200, 1, sizeZ / 200);
-      fallbackGround.position.y = minY - 0.2;
+      const groundX = Math.max(80, sizeX * 1.5);
+      const groundZ = Math.max(80, sizeZ * 1.5);
+      fallbackGround.scaling = new BABYLON.Vector3(groundX / 200, 1, groundZ / 200);
+      fallbackGround.position.y = -0.2;
       fallbackGround.position.x = 0;
       fallbackGround.position.z = 0;
-      console.info("[forest] bounds size:", scaledBounds.max.subtract(scaledBounds.min).toString());
+      console.info("[forest] bounds size:", scaled.max.subtract(scaled.min).toString());
       console.info("[forest] spawn at:", data.spawnPosition.toString());
+      console.info("[forest] scaleFactor:", scaleFactor.toFixed(4));
       data.player.position.copyFrom(data.spawnPosition);
       data.cameraRig.smoothedPosition = null;
     }
