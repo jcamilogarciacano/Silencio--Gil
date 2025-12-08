@@ -189,6 +189,7 @@ function createStreetScene(targetEngine) {
   createPistolAttachment(scene, player);
   attachPlayerModel(scene, player);
   const cameraRig = setupCamera(scene, player);
+  applyScreenNoise(cameraRig.camera);
   const isActive = () => activeSceneData?.scene === scene;
   const inputState = setupInput(scene, player, cameraRig, isActive);
   hudElements = createHUD();
@@ -208,6 +209,9 @@ function createForestScene(targetEngine) {
   scene.clearColor = new BABYLON.Color4(0.2, 0.22, 0.2, 1);
   scene.gravity = new BABYLON.Vector3(0, -GRAVITY, 0);
   scene.collisionsEnabled = true;
+  scene.fogMode = BABYLON.Scene.FOGMODE_EXP;
+  scene.fogColor = FOG_COLOR;
+  scene.fogDensity = FOG_DENSITY;
   // Safety ground in case the glb lacks a floor collider.
   const fallbackGround = BABYLON.MeshBuilder.CreateGround("forestFallbackGround", { width: 200, height: 200 }, scene);
   fallbackGround.position.y = -0.2;
@@ -228,6 +232,8 @@ function createForestScene(targetEngine) {
   const isActive = () => activeSceneData?.scene === scene;
   const inputState = setupInput(scene, player, cameraRig, isActive);
   attachPlayerModel(scene, player);
+  applyScreenNoise(cameraRig.camera);
+  applyScreenNoise(cameraRig.camera);
 
   const data = {
     scene,
@@ -951,6 +957,19 @@ function attachPlayerModel(scene, player) {
       console.error("[playerModel] load failed:", message, exception);
     }
   );
+}
+
+function applyScreenNoise(camera) {
+  if (!camera) return;
+  if (BABYLON.GrainPostProcess) {
+    const grain = new BABYLON.GrainPostProcess("screenGrain", 1.0, camera, BABYLON.Texture.NEAREST_SAMPLINGMODE, engine, false);
+    grain.animated = true;
+    grain.intensity = 15;
+    grain.adaptScaleToCurrentViewport = true;
+    return grain;
+  }
+  console.warn("[postprocess] GrainPostProcess unavailable; screen noise skipped");
+  return null;
 }
 
 function handlePlayerAttack(player) {
