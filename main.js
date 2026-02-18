@@ -107,6 +107,7 @@ const playerState = {
   maxAmmoPistol: PISTOL_MAX_AMMO,
   lastAttackType: null,
 };
+let isPaused = false;
 let hudElements = null;
 let hitEffectManager = null;
 const hitEffects = [];
@@ -556,6 +557,7 @@ function updatePickups(player) {
       }
       pickup.collected = true;
       pickup.mesh.isVisible = false;
+      window.playGameSound?.("pickupCollect", 0.35, 0.9 + Math.random() * 0.2);
       if (pickup.kind === "weapon") {
         if (!playerState.inventory.some((item) => item.id === pickup.id && item.kind === "weapon")) {
           playerState.inventory.push({ kind: "weapon", id: pickup.id });
@@ -755,6 +757,7 @@ function handlePlayerAttack(player) {
   if (weaponId === "pistol") {
     if (playerState.ammoPistol <= 0) return;
     playerState.ammoPistol = Math.max(0, playerState.ammoPistol - 1);
+    window.playGameSound?.("pistolShot", 0.3, 0.95 + Math.random() * 0.1);
     // Narrow cone, pick nearest in arc to simulate hitscan.
     let bestEnemy = null;
     let bestDist = Number.MAX_VALUE;
@@ -775,11 +778,13 @@ function handlePlayerAttack(player) {
       bestEnemy.health -= weaponDamage;
       spawnHitEffect(bestEnemy.mesh.position);
       spawnBullet(player, bestEnemy.mesh.position, forwardDir);
+      window.playGameSound?.("hitImpact", 0.4);
       if (bestEnemy.health <= 0) {
         bestEnemy.health = 0;
         bestEnemy.isAlive = false;
         hordeState.killsThisRound++;
         hordeState.totalKills++;
+        window.playGameSound?.("enemyDeath", 0.3, 0.8 + Math.random() * 0.3);
       }
     } else {
       const missTarget = player.position.add(forwardDir.scale(weaponRange));
@@ -787,6 +792,8 @@ function handlePlayerAttack(player) {
     }
     return;
   }
+
+  window.playGameSound?.("batSwing", 0.25, 0.9 + Math.random() * 0.2);
 
   enemies.forEach((enemy) => {
     if (!enemy.isAlive || !enemy.mesh || enemy.mesh.isDisposed()) return;
@@ -799,11 +806,13 @@ function handlePlayerAttack(player) {
 
     enemy.health -= weaponDamage;
     spawnHitEffect(enemy.mesh.position);
+    window.playGameSound?.("hitImpact", 0.4);
     if (enemy.health <= 0) {
       enemy.health = 0;
       enemy.isAlive = false;
       hordeState.killsThisRound++;
       hordeState.totalKills++;
+      window.playGameSound?.("enemyDeath", 0.3, 0.8 + Math.random() * 0.3);
     }
   });
 }
@@ -890,6 +899,7 @@ function setupInput(scene, player, cameraRig) {
     restartPressed: false,
     switchTo: null,
     usePressed: false,
+    pausePressed: false,
   };
 
   const keyMap = {
@@ -963,6 +973,10 @@ function setupInput(scene, player, cameraRig) {
       state.usePressed = true;
       event.preventDefault();
     }
+    if (event.code === "Escape" && !event.repeat) {
+      state.pausePressed = true;
+      event.preventDefault();
+    }
   });
 
   window.addEventListener("keyup", (event) => {
@@ -998,11 +1012,20 @@ function setupInput(scene, player, cameraRig) {
 function setupAmbientAudio() {
   let started = false;
   let audioContext;
+  const soundEffects = {
+    pistolShot: null,
+    batSwing: null,
+    hitImpact: null,
+    pickupCollect: null,
+    enemyDeath: null,
+  };
 
   const startNoise = () => {
     if (started) return;
     started = true;
     audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    
+    // Ambient background noise
     const duration = 2;
     const buffer = audioContext.createBuffer(1, audioContext.sampleRate * duration, audioContext.sampleRate);
     const data = buffer.getChannelData(0);
@@ -1024,6 +1047,86 @@ function setupAmbientAudio() {
     filter.connect(gain);
     gain.connect(audioContext.destination);
     source.start(0);
+
+    // Create sound effect buffers
+    createSoundEffects();
+  };
+
+  const createSoundEffects = () => {
+    if (!audioContext) return;
+
+    // Pistol shot - short burst with decay
+    const pistolBuffer = audioContext.createBuffer(1, audioContext.sampleRate * 0.15, audioContext.sampleRate);
+    const pistolData = pistolBuffer.getChannelData(0);
+    for (let i = 0; i < pistolData.length; i++) {
+      const t = i / audioContext.sampleRate;
+      const envelope = Math.exp(-t * 35);
+      pistolData[i] = (Math.random() * 2 - 1) * envelope * 0.5;
+    }
+    soundEffects.pistolShot = pistolBuffer;
+
+    // Bat swing - whoosh sound
+    const batBuffer = audioContext.createBuffer(1, audioContext.sampleRate * 0.2, audioContext.sampleRate);
+    const batData = batBuffer.getChannelData(0);
+    for (let i = 0; i < batData.length; i++) {
+      const t = i / audioContext.sampleRate;
+      const freq = 80 + t * 200;
+      const envelope = Math.sin(t * Math.PI * 5) * Math.exp(-t * 8);
+      batData[i] = Math.sin(t * freq * Math.PI * 2) * envelope * 0.2;
+    }
+    soundEffects.batSwing = batBuffer;
+
+    // Hit impact - short punch
+    const hitBuffer = audioContext.createBuffer(1, audioContext.sampleRate * 0.08, audioContext.sampleRate);
+    const hitData = hitBuffer.getChannelData(0);
+    for (let i = 0; i < hitData.length; i++) {
+      const t = i / audioContext.sampleRate;
+      const envelope = Math.exp(-t * 50);
+      hitData[i] = (Math.random() * 2 - 1) * envelope * 0.4;
+    }
+    soundEffects.hitImpact = hitBuffer;
+
+    // Pickup collect - pleasant chime
+    const pickupBuffer = audioContext.createBuffer(1, audioContext.sampleRate * 0.25, audioContext.sampleRate);
+    const pickupData = pickupBuffer.getChannelData(0);
+    for (let i = 0; i < pickupData.length; i++) {
+      const t = i / audioContext.sampleRate;
+      const envelope = Math.exp(-t * 8);
+      const freq1 = 440;
+      const freq2 = 550;
+      pickupData[i] = (Math.sin(t * freq1 * Math.PI * 2) + Math.sin(t * freq2 * Math.PI * 2)) * envelope * 0.15;
+    }
+    soundEffects.pickupCollect = pickupBuffer;
+
+    // Enemy death - descending tone
+    const deathBuffer = audioContext.createBuffer(1, audioContext.sampleRate * 0.4, audioContext.sampleRate);
+    const deathData = deathBuffer.getChannelData(0);
+    for (let i = 0; i < deathData.length; i++) {
+      const t = i / audioContext.sampleRate;
+      const freq = 200 - t * 150;
+      const envelope = Math.exp(-t * 5);
+      deathData[i] = Math.sin(t * freq * Math.PI * 2) * envelope * 0.2;
+    }
+    soundEffects.enemyDeath = deathBuffer;
+  };
+
+  const playSound = (soundName, volume = 1.0, pitch = 1.0) => {
+    if (!audioContext || !soundEffects[soundName]) return;
+    
+    try {
+      const source = audioContext.createBufferSource();
+      source.buffer = soundEffects[soundName];
+      source.playbackRate.value = pitch;
+
+      const gainNode = audioContext.createGain();
+      gainNode.gain.value = volume;
+
+      source.connect(gainNode);
+      gainNode.connect(audioContext.destination);
+      source.start(0);
+    } catch (e) {
+      console.warn('Audio playback failed:', e);
+    }
   };
 
   ["pointerdown", "keydown"].forEach((eventName) => {
@@ -1032,9 +1135,22 @@ function setupAmbientAudio() {
       audioContext?.resume?.();
     });
   });
+
+  // Expose global sound player
+  window.playGameSound = playSound;
 }
 
 function update(scene, player, cameraRig, inputState, delta) {
+  if (inputState.pausePressed) {
+    isPaused = !isPaused;
+    inputState.pausePressed = false;
+    updateHUD();
+  }
+
+  if (isPaused) {
+    return;
+  }
+
   playerState.attackCooldown = Math.max(0, playerState.attackCooldown - delta);
   playerState.attackAnimTime = Math.max(0, playerState.attackAnimTime - delta);
   hitOverlayTime = Math.max(0, hitOverlayTime - delta);
@@ -1235,7 +1351,10 @@ function createHUD() {
   });
 
   const controls = document.createElement("div");
-  controls.innerHTML = "Space: attack | E: use item | 1-0: select slot | R: restart";
+  controls.innerHTML = "Mouse: look | WASD: move/turn | Shift: run | Space: attack<br>E: use item | 1-0: select slot | ESC: pause | R: restart (when dead)";
+  controls.style.fontSize = "11px";
+  controls.style.marginTop = "6px";
+  controls.style.lineHeight = "1.4";
 
   container.appendChild(hp);
   container.appendChild(hpBarWrapper);
@@ -1303,20 +1422,79 @@ function createHUD() {
 
   const ammoIndicator = document.createElement("div");
   Object.assign(ammoIndicator.style, {
-    position: "fixed",
-    top: "45%",
-    left: "58%",
-    transform: "translate(-50%, -50%)",
+    marginTop: "6px",
     color: "#e5e5e5",
     fontFamily: '"Courier New", monospace',
-    fontSize: "14px",
-    pointerEvents: "none",
-    textShadow: "0 0 6px rgba(0,0,0,0.6)",
+    fontSize: "12px",
     display: "none",
   });
-  document.body.appendChild(ammoIndicator);
+  container.appendChild(ammoIndicator);
 
-  return { container, hp, hpBarFill, inventory, controls, deathMessage, hitOverlay, hordeInfo, leaderboard, ammoIndicator };
+  const crosshair = document.createElement("div");
+  Object.assign(crosshair.style, {
+    position: "fixed",
+    top: "50%",
+    left: "50%",
+    transform: "translate(-50%, -50%)",
+    width: "20px",
+    height: "20px",
+    pointerEvents: "none",
+    zIndex: "1000",
+  });
+  crosshair.innerHTML = `
+    <div style="position: absolute; top: 50%; left: 0; width: 100%; height: 2px; background: rgba(255, 255, 255, 0.7); transform: translateY(-50%);"></div>
+    <div style="position: absolute; left: 50%; top: 0; height: 100%; width: 2px; background: rgba(255, 255, 255, 0.7); transform: translateX(-50%);"></div>
+    <div style="position: absolute; top: 50%; left: 50%; width: 4px; height: 4px; background: rgba(255, 255, 255, 0); border: 2px solid rgba(255, 255, 255, 0.5); border-radius: 50%; transform: translate(-50%, -50%);"></div>
+  `;
+  document.body.appendChild(crosshair);
+
+  const pointerLockPrompt = document.createElement("div");
+  Object.assign(pointerLockPrompt.style, {
+    position: "fixed",
+    top: "50%",
+    left: "50%",
+    transform: "translate(-50%, -50%)",
+    padding: "20px 30px",
+    background: "rgba(0, 0, 0, 0.85)",
+    border: "2px solid rgba(255, 255, 255, 0.4)",
+    borderRadius: "8px",
+    fontSize: "18px",
+    fontFamily: '"Courier New", monospace',
+    color: "#ffffff",
+    textAlign: "center",
+    pointerEvents: "none",
+    display: "none",
+    zIndex: "999",
+  });
+  pointerLockPrompt.innerHTML = "<div style='font-size: 24px; margin-bottom: 10px;'>🖱️ Click to Play</div><div style='font-size: 14px; color: #aaa;'>Click anywhere to lock pointer and start looking around</div>";
+  document.body.appendChild(pointerLockPrompt);
+
+  const pauseMenu = document.createElement("div");
+  Object.assign(pauseMenu.style, {
+    position: "fixed",
+    top: "50%",
+    left: "50%",
+    transform: "translate(-50%, -50%)",
+    padding: "30px 40px",
+    background: "rgba(0, 0, 0, 0.9)",
+    border: "2px solid rgba(255, 255, 255, 0.5)",
+    borderRadius: "10px",
+    fontSize: "16px",
+    fontFamily: '"Courier New", monospace',
+    color: "#e5e5e5",
+    textAlign: "center",
+    display: "none",
+    zIndex: "1001",
+  });
+  pauseMenu.innerHTML = `
+    <div style='font-size: 28px; margin-bottom: 20px; color: #ffffff;'>PAUSED</div>
+    <div style='margin-bottom: 10px;'>Press ESC to resume</div>
+    <div style='margin-bottom: 10px;'>Press R to restart</div>
+    <div style='margin-top: 20px; font-size: 12px; color: #888;'>Game continues when you return</div>
+  `;
+  document.body.appendChild(pauseMenu);
+
+  return { container, hp, hpBarFill, inventory, controls, deathMessage, hitOverlay, hordeInfo, leaderboard, ammoIndicator, crosshair, pointerLockPrompt, pauseMenu };
 }
 
 function updateHUD() {
@@ -1341,6 +1519,17 @@ function updateHUD() {
     const showAmmo = getCurrentWeaponId() === "pistol";
     hudElements.ammoIndicator.style.display = showAmmo ? "block" : "none";
     hudElements.ammoIndicator.textContent = showAmmo ? `Ammo: ${playerState.ammoPistol}/${playerState.maxAmmoPistol}` : "";
+    if (showAmmo && playerState.ammoPistol === 0) {
+      hudElements.ammoIndicator.style.color = "#ff6b6b";
+    } else {
+      hudElements.ammoIndicator.style.color = "#e5e5e5";
+    }
+  }
+  if (hudElements.pointerLockPrompt) {
+    hudElements.pointerLockPrompt.style.display = (document.pointerLockElement || isPaused || !playerState.isAlive) ? "none" : "block";
+  }
+  if (hudElements.pauseMenu) {
+    hudElements.pauseMenu.style.display = isPaused ? "block" : "none";
   }
   renderInventoryUI();
 }
